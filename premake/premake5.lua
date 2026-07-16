@@ -1,0 +1,62 @@
+workspace "strikers"
+    location "../generated"
+    configurations { "debug", "release" }
+    language "C++"
+    architecture "x64"
+    multiprocessorcompile("on")
+    platforms { "win64" }
+
+project "strikers"
+    kind        "ConsoleApp"
+    language    "C++"
+    cppdialect  "C++20"
+    targetdir   "../bin/%{cfg.buildcfg}"
+    objdir      "../int/%{cfg.buildcfg}"
+    basedir     "../"
+
+    local includeDir = "../include/"
+    local sourceFiles = {
+        "../source/**.c",
+        "../source/**.cpp"
+    }
+    local headerFiles = {
+        includeDir .. "/**.h",
+        includeDir .. "/**.hpp"
+    }
+    local shaderFiles = {
+        "../hlsl/**.hlsl",
+        "../hlsl/**.hlsli"
+    }
+    files(sourceFiles)
+    files(headerFiles)
+    files(shaderFiles)
+    vpaths {
+        ["source/*"] = sourceFiles,
+        ["include/*"] = headerFiles,
+        ["hlsl/*"] = shaderFiles
+    }
+    includedirs {
+        includeDir,
+        "../thirdparty/glm/include",
+        "../thirdparty/assimp/include"
+    }
+    libdirs {
+        "../thirdparty/dxc/lib/",
+        "../thirdparty/assimp/lib/"
+    }
+
+    filter "files:**.hlsl"
+        buildaction "None"
+    filter {}
+
+    filter "platforms:win64"
+        defines {"DF_WINDOWS"}
+    filter{}
+    filter "configurations:debug"
+       defines { "DF_DEBUG" }
+       symbols "On"
+    filter{}
+    filter "configurations:release"
+       defines { "DF_RELEASE" }
+       optimize "On"
+    filter{}
