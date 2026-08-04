@@ -3,5 +3,5 @@ import subprocess
 
 os.chdir("..")
 subprocess.run([
-    "git add -A && git commit -m \"linux commit\""
+    "git add -A && git commit -m \"linux commit\" && git push"
 ], check=True)
