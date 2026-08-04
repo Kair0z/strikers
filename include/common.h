@@ -15,6 +15,10 @@
 #include <Windows.h>
 #endif
 
+// linux
+#if DF_LINUX
+#endif
+
 // GLM
 #include "glm/glm.hpp"
 #include "glm/matrix.hpp"

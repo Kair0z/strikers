@@ -4,14 +4,14 @@ workspace "strikers"
     language "C++"
     architecture "x64"
     multiprocessorcompile("on")
-    platforms { "win64" }
+    platforms { "win64", "linux" }
 
 project "strikers"
     kind        "ConsoleApp"
     language    "C++"
     cppdialect  "C++20"
-    targetdir   "../bin/%{cfg.buildcfg}"
-    objdir      "../int/%{cfg.buildcfg}"
+    targetdir   "../bin/%{cfg.buildcfg}_%{cfg.platform}"
+    objdir      "../int/%{cfg.buildcfg}_%{cfg.platform}"
     basedir     "../"
 
     local includeDir = "../include/"
@@ -51,6 +51,9 @@ project "strikers"
 
     filter "platforms:win64"
         defines {"DF_WINDOWS"}
+    filter{}
+    filter "platforms:linux"
+        defines {"DF_LINUX"}
     filter{}
     filter "configurations:debug"
        defines { "DF_DEBUG" }
