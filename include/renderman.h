@@ -2,6 +2,7 @@
 
 #include "common.h"
 #include "contentman.h"
+#include "logman.h"
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -15,11 +16,25 @@ struct gpu_vertex
 {
 	float3 m_position;
 	float3 m_normal;
+	float2 m_uv;
+	uint4 m_bone_ids;
+	float4 m_bone_weights;
 };
 struct gpu_instance
 {
 	mat4x4 m_transform;
 	float4 m_color;
+	uint32 m_tex_basecolor_idx;
+};
+struct gpu_ui_instance
+{
+	float4 m_box;
+	uint32 m_tex_heap_idx;
+};
+struct gpu_bone
+{
+	float4x4 m_matrix;
+	int m_parent;
 };
 struct gpu_cbuffer
 {
@@ -42,285 +57,184 @@ using dxfence = ID3D12Fence;
 using dxstate = ID3D12StateObject;
 using dxsignature = ID3D12RootSignature;
 using dxresource_state = D3D12_RESOURCE_STATES;
-using dxpipeline_graphics = ID3D12PipelineState;
+using dxpipeline = ID3D12PipelineState;
 
-static string hr_to_string(HRESULT hr)
+enum class shader
 {
-	char* msg = nullptr;
-	DWORD flags =
-		FORMAT_MESSAGE_ALLOCATE_BUFFER |
-		FORMAT_MESSAGE_FROM_SYSTEM |
-		FORMAT_MESSAGE_IGNORE_INSERTS;
+	shaded,
+	wireframe,
+	num
+};
 
-	DWORD size = FormatMessageA(
-		flags,
-		nullptr,
-		hr,
-		0,
-		(LPSTR)&msg,
-		0,
-		nullptr
-	);
-
-	string result;
-	if (size && msg) result = msg;
-	else result = "Unknown HRESULT";
-
-	if (msg) LocalFree(msg);
-	return result;
-}
-
-static DxcBuffer blob_encoding_to_dxc(IDxcBlobEncoding* encoding)
+class renderscene final
 {
-	DxcBuffer result;
-	int encoding_known = false; uint32 code_page;
-	if (SUCCEEDED(encoding->GetEncoding(&encoding_known, &code_page)))
-	{
-		result.Encoding = code_page;
-	}
+public:
+	struct {
+		transform m_transform;
+		float m_fov;
+		float m_near;
+		float m_far;
+	} m_camera;
+	struct {
+		float4 m_color;
+		float4 m_direction;
+	} m_light;
 	
-	result.Ptr = encoding->GetBufferPointer();
-	result.Size = encoding->GetBufferSize();
-	return result;
-}
-
-static result<dxresource*> allocate_gpu_buffer(
-	dxdevice& device, 
-	const uint64 bytesize,
-	const uint64 bytestride,
-	bool allow_uav,
-	D3D12_HEAP_TYPE heap_type = D3D12_HEAP_TYPE_DEFAULT)
-{
-	using restype = result<dxresource*>;
-
-	D3D12_HEAP_PROPERTIES heap_props{};
-	heap_props.Type = heap_type;
-
-	D3D12_RESOURCE_DESC desc = {};
-	desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-	desc.Width = bytesize;
-	desc.Height = 1;
-	desc.DepthOrArraySize = 1;
-	desc.MipLevels = 1;
-	desc.SampleDesc.Count = 1;
-	desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-	
-	if (allow_uav) desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-
-	D3D12_RESOURCE_STATES init_state = D3D12_RESOURCE_STATE_COMMON;
-	if (heap_type == D3D12_HEAP_TYPE_UPLOAD)
+	struct batch_key
 	{
-		init_state = D3D12_RESOURCE_STATE_GENERIC_READ;
+		mesh_id m_mesh;
+		shader m_shader;
+
+		struct hash_t {
+			uint64 operator()(const batch_key& k) const {
+				return ((uint64)k.m_mesh ^ (uint64)k.m_shader) << 1;
+			}
+		};
+		struct equal_t {
+			static bool operator()(const batch_key& lhs, const batch_key& rhs)
+			{
+				return lhs.m_mesh == rhs.m_mesh && lhs.m_shader == rhs.m_shader;
+			}
+		};
+	};
+
+	struct mesh_instance
+	{
+		transform m_transform;
+		float4 m_color;
+		float m_time;
+
+		// bindings
+		mesh_id m_mesh				= k_id_invalid;
+		skel_id m_skeleton			= k_id_invalid;
+		shader m_shader				= shader::shaded;
+		image_id m_img_basecolor	= k_id_invalid;
+
+		void apply_material(const contentman& cman, const mat_id mat);
+	};
+
+	struct ui_instance
+	{
+		float4 m_box;
+		image_id m_image;
+	};
+
+	mesh_instance& add_mesh_instance(const mesh_id mesh, const shader shdr)
+	{
+		m_batch_instance_lookup[{mesh, shdr}].push_back((uint32)m_mesh_instances.size());
+		m_mesh_instances.push_back({});
+		m_mesh_instances.back().m_mesh = mesh;
+		return m_mesh_instances.back();
 	}
 
-	dxresource* resource;
-	HRESULT hres = device.CreateCommittedResource(
-		&heap_props,
-		D3D12_HEAP_FLAG_NONE,
-		&desc,
-		init_state,
-		nullptr,
-		IID_PPV_ARGS(&resource)
-	);
-
-	if (!SUCCEEDED(hres))
+	ui_instance& add_ui_instance()
 	{
-		return restype::make_fail("");
+		m_ui_instances.push_back({});
+		return m_ui_instances.back();
 	}
-	else return restype::make_success(resource);
-}
 
-static result<dxresource*> allocate_gpu_texture(
-	dxdevice& device,
-	const uint32 num_dimensions,
-	const uint3& dimensions,
-	bool allow_uav,
-	D3D12_RESOURCE_STATES init_state = D3D12_RESOURCE_STATE_COMMON)
-{
-	using restype = result<dxresource*>;
-
-	D3D12_HEAP_PROPERTIES heap_props{};
-	heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-	D3D12_RESOURCE_DESC desc = {};
-	switch (num_dimensions)
+	uint32 get_meshbatch_num_instances(const batch_key& key) const
 	{
-	case 1: desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE1D; break;
-	case 2: desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; break;
-	case 3: desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D; break;
-	default:
-		return restype::make_fail("texture of dimensions !1, !2 or !3 are not supported");
+		return (uint32)m_batch_instance_lookup.at(key).size();
 	}
-	desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-	desc.Width = dimensions.x;
-	desc.Height = dimensions.y;
-	desc.DepthOrArraySize = dimensions.z;
-	desc.MipLevels = 1;
-	desc.SampleDesc.Count = 1;
-	desc.SampleDesc.Quality = 0;
-	// desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-	if (allow_uav) desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
-	dxresource* resource;
-	HRESULT hres = device.CreateCommittedResource(
-		&heap_props,
-		D3D12_HEAP_FLAG_NONE,
-		&desc,
-		init_state,
-		nullptr,
-		IID_PPV_ARGS(&resource)
-	);
-	
-	if (!SUCCEEDED(hres))
+	uint32 get_meshbatch_first_instance(const batch_key& key) const
 	{
-		return restype::make_fail("");
-	}
-	else return resource;
-}
-
-	static void release_if_valid(IUnknown* anything)
-	{
-		if (anything != nullptr)
+		uint32 offset = 0;
+		for (const auto& pair : m_batch_instance_lookup)
 		{
-			anything->Release();
+			if (batch_key::equal_t::operator()(key, pair.first)) return offset;
+			offset += (uint32)pair.second.size();
 		}
+		return 0;
 	}
 
-	class renderscene final
-	{
-	public:
-		struct
-		{
-			transform m_transform;
-			float m_fov;
-			float m_near;
-			float m_far;
-		} m_camera;
+	umap<batch_key, vector<uint32>, batch_key::hash_t, batch_key::equal_t> m_batch_instance_lookup;
+	vector<mesh_instance> m_mesh_instances;
+	vector<ui_instance> m_ui_instances;
+};
 
-		struct
-		{
-			float4 m_color;
-			float4 m_direction;
-		} m_light;
+enum class shader_type
+{
+	vs,
+	ps,
+	lib,
+	num
+};
+
+class shaderman final
+{
+public:
+	using shader_key = uint64;
+	static shader_key make_shader_key(
+		const stringview& filepath, 
+		const stringview& entrypoint,
+		const stringview& target)
+	{
+		string copy1 = normalize_path(filepath);
+		string copy2 = normalize_path(entrypoint);
+		string copy3 = normalize_path(target);
+		const uint64 hash1 = std::hash<stringview>{}(copy1);
+		const uint64 hash2 = std::hash<stringview>{}(copy2);
+		const uint64 hash3 = std::hash<stringview>{}(copy3);
+
+		// hash combine (boost-style)
+		return static_cast<shader_key>(
+			hash3 ^ hash1 ^ (hash2 + 0x9e3779b9 + (hash1 << 6) + (hash1 >> 2))
+			);
+	}
+	struct shader_entry final
+	{
+		ID3DBlob* m_shaderlib;
+		IDxcBlob* m_blob_rootsignature;
+		dxstate* m_state_object;
+		dxsignature* m_signature;
+
+		D3D12_SHADER_BYTECODE m_shader_bytecode;
+
+		ID3D12StateObjectProperties1* m_state_object_props;
+		ID3D12WorkGraphProperties* m_workgraph_props;
+		D3D12_WORK_GRAPH_MEMORY_REQUIREMENTS m_graph_mem_requirements;
+		D3D12_PROGRAM_IDENTIFIER m_program_id;
+		dxresource* m_backing_memory;
+		uint32 m_workgraph_idx;
+		uint32 m_entrypoint_idx;
+	};
+
+private:
+	HMODULE dll_dxcompiler;
+	IDxcUtils* m_utils;
+	IDxcCompiler3* m_compiler;
+	umap<shader_key, shader_entry> m_shaders;
+	result<IDxcOperationResult*> compile_dxc_file(const DxcBuffer& filebuffer, const vector<string>& args)
+	{
+		using restype = result<IDxcOperationResult*>;
 		
-		struct instance
+		vector<wstring> wargs{};
+		for (const string& str : args)
 		{
-			transform m_transform;
-			float4 m_color;
-			mesh_id m_mesh;
-			bool m_ignored;
-		};
-
-		instance& add_instance(const mesh_id mesh)
+			wargs.push_back(to_wstring(str));
+		}
+		vector<LPCWSTR> converted_args{};
+		for (const wstring& wstr : wargs)
 		{
-			m_batch_instance_lookup[mesh].push_back((uint32)m_instances.size());
-			m_instances.push_back({});
-			m_instances.back().m_mesh = mesh;
-			return m_instances.back();
+			converted_args.push_back(wstr.c_str());
 		}
 
-		uint32 get_batch_num_instances(const mesh_id mesh) const
+		IDxcOperationResult* operation_result;
+		HRESULT hres = m_compiler->Compile(&filebuffer, converted_args.data(), (uint32)converted_args.size(), nullptr, IID_PPV_ARGS(&operation_result));
+		if (!SUCCEEDED(hres))
 		{
-			return (uint32)m_batch_instance_lookup.at(mesh).size();
+			return restype::make_fail("");
 		}
 
-		uint32 get_batch_first_instance(const mesh_id mesh) const
-		{
-			uint32 offset = 0;
-			for (const auto& pair : m_batch_instance_lookup)
-			{
-				if (pair.first == mesh) return offset;
-				offset += (uint32)pair.second.size();
-			}
-			return 0;
-		}
+		return restype::make_success(operation_result);
+	}
 
-		using batch_key = mesh_id;
-		umap<batch_key, vector<uint32>> m_batch_instance_lookup;
-		vector<instance> m_instances;
-	};
+public:
+	shaderman() { initialize(); }
 
-	enum class shader_type
-	{
-		vs,
-		ps,
-		lib,
-		num
-	};
-
-	class shaderman final
-	{
-	public:
-		using shader_key = uint64;
-		static shader_key make_shader_key(
-			const stringview& filepath, 
-			const stringview& entrypoint,
-			const stringview& target)
-		{
-			string copy1 = normalize_path(filepath);
-			string copy2 = normalize_path(entrypoint);
-			string copy3 = normalize_path(target);
-			const uint64 hash1 = std::hash<stringview>{}(copy1);
-			const uint64 hash2 = std::hash<stringview>{}(copy2);
-			const uint64 hash3 = std::hash<stringview>{}(copy3);
-
-			// hash combine (boost-style)
-			return static_cast<shader_key>(
-				hash3 ^ hash1 ^ (hash2 + 0x9e3779b9 + (hash1 << 6) + (hash1 >> 2))
-				);
-		}
-		struct shader_entry final
-		{
-			ID3DBlob* m_shaderlib;
-			IDxcBlob* m_blob_rootsignature;
-			dxstate* m_state_object;
-			dxsignature* m_signature;
-
-			D3D12_SHADER_BYTECODE m_shader_bytecode;
-
-			ID3D12StateObjectProperties1* m_state_object_props;
-			ID3D12WorkGraphProperties* m_workgraph_props;
-			D3D12_WORK_GRAPH_MEMORY_REQUIREMENTS m_graph_mem_requirements;
-			D3D12_PROGRAM_IDENTIFIER m_program_id;
-			dxresource* m_backing_memory;
-			uint32 m_workgraph_idx;
-			uint32 m_entrypoint_idx;
-		};
-
-	private:
-		HMODULE dll_dxcompiler;
-		IDxcUtils* m_utils;
-		IDxcCompiler3* m_compiler;
-		umap<shader_key, shader_entry> m_shaders;
-		result<IDxcOperationResult*> compile_dxc_file(const DxcBuffer& filebuffer, const vector<string>& args)
-		{
-			using restype = result<IDxcOperationResult*>;
-			
-			vector<wstring> wargs{};
-			for (const string& str : args)
-			{
-				wargs.push_back(to_wstring(str));
-			}
-			vector<LPCWSTR> converted_args{};
-			for (const wstring& wstr : wargs)
-			{
-				converted_args.push_back(wstr.c_str());
-			}
-
-			IDxcOperationResult* operation_result;
-			HRESULT hres = m_compiler->Compile(&filebuffer, converted_args.data(), (uint32)converted_args.size(), nullptr, IID_PPV_ARGS(&operation_result));
-			if (!SUCCEEDED(hres))
-			{
-				return restype::make_fail("");
-			}
-
-			return restype::make_success(operation_result);
-		}
-
-	public:
-		shaderman() { initialize(); }
-
-		result<> initialize()
+	result<> initialize()
 		{
 			using restype = result<>;
 			dll_dxcompiler = LoadLibrary(L"dxcompiler.dll");
@@ -339,16 +253,16 @@ static result<dxresource*> allocate_gpu_texture(
 			return restype::make_success();
 		}
 
-		result<> compile_shader(
-			const stringview& filepath, 
-			const stringview& entrypoint, 
-			const stringview& target,
-			dxdevice& device);
+	result<> compile_shader(
+		const stringview& filepath, 
+		const stringview& entrypoint, 
+		const stringview& target,
+		dxdevice& device);
 
-		result<shader_entry const*> get_shader(
-			const stringview& filepath,
-			const stringview& entrypoint,
-			const stringview& target) const
+	result<shader_entry const*> get_shader(
+		const stringview& filepath,
+		const stringview& entrypoint,
+		const stringview& target) const
 		{
 			using restype = result<shader_entry const*>;
 			const auto& key = make_shader_key(filepath, entrypoint, target);
@@ -358,14 +272,13 @@ static result<dxresource*> allocate_gpu_texture(
 			}
 			else return &m_shaders.at(key);
 		}
-	};
+};
 
-	class renderman final
-	{
-		static constexpr uint32 k_num_swapchain_buffers = 3;
+class renderman final
+{
+	static constexpr uint32 k_num_swapchain_buffers = 3;
 
-#pragma region descriptors
-		enum class descriptor_heap
+	enum class descriptor_heap
 		{
 			rtv,
 			dsv,
@@ -375,9 +288,9 @@ static result<dxresource*> allocate_gpu_texture(
 			gpu_sampler,
 			num
 		};
-		static constexpr uint32 k_num_descriptor_heaps = (uint32)descriptor_heap::num;
-		static constexpr uint32 k_descriptor_heap_nums[k_num_descriptor_heaps]
-		{
+	static constexpr uint32 k_num_descriptor_heaps = (uint32)descriptor_heap::num;
+	static constexpr uint32 k_descriptor_heap_nums[k_num_descriptor_heaps]
+	{
 			16,
 			16,
 			16,
@@ -385,7 +298,7 @@ static result<dxresource*> allocate_gpu_texture(
 			16,
 			16
 		};
-		static const uint32 get_descheap_size(descriptor_heap heap)
+	static const uint32 get_descheap_size(descriptor_heap heap)
 		{
 			static const uint32 k_sizes[k_num_descriptor_heaps]
 			{
@@ -398,7 +311,7 @@ static result<dxresource*> allocate_gpu_texture(
 			};
 			return k_sizes[(int)heap];
 		}
-		static const D3D12_DESCRIPTOR_HEAP_TYPE get_descheap_type(descriptor_heap heap)
+	static const D3D12_DESCRIPTOR_HEAP_TYPE get_descheap_type(descriptor_heap heap)
 		{
 			static const D3D12_DESCRIPTOR_HEAP_TYPE k_types[k_num_descriptor_heaps]
 			{
@@ -411,11 +324,11 @@ static result<dxresource*> allocate_gpu_texture(
 			};
 			return k_types[(int)heap];
 		}
-		static const bool is_descheap_gpu_readable(descriptor_heap heap)
+	static const bool is_descheap_gpu_readable(descriptor_heap heap)
 		{
 			return heap == descriptor_heap::gpu_resource || heap == descriptor_heap::gpu_sampler;
 		}
-		enum class descriptor_type
+	enum class descriptor_type
 		{
 			rtv,
 			dsv,
@@ -425,12 +338,12 @@ static result<dxresource*> allocate_gpu_texture(
 			sampler,
 			num
 		};
-		static constexpr uint32 k_num_descriptor_types = (uint32)descriptor_type::num;
-		static const bool can_gpu_read_descriptor(descriptor_type type)
+	static constexpr uint32 k_num_descriptor_types = (uint32)descriptor_type::num;
+	static const bool can_gpu_read_descriptor(descriptor_type type)
 		{
 			return (type != descriptor_type::rtv) && (type != descriptor_type::dsv);
 		}
-		static const descriptor_heap get_descheap_type(descriptor_type type, bool gpu_readable)
+	static const descriptor_heap get_descheap_type(descriptor_type type, bool gpu_readable)
 		{
 			descriptor_heap heap_type{};
 			switch (type)
@@ -451,37 +364,39 @@ static result<dxresource*> allocate_gpu_texture(
 			}
 			return descriptor_heap::num;
 		}
-		struct descriptor final
+	struct descriptor final
 		{
 			descriptor_heap m_owner;
 			descriptor_type m_type;
 			uint32 m_heap_idx;
 		};
-#pragma endregion
 
-		dxfactory* m_factory;
-		dxdevice* m_device;
-		dxqueue* m_queue;
-		dxadapter* m_adapter;
-		dxallocator* m_cmd_allocator;
-		dxcmdlist* m_cmdlist;
-		dxfence* m_frame_fence;
-		uint64 m_frame;
-		shaderman m_shaderman;
+	dxfactory* m_factory;
+	dxdevice* m_device;
+	dxqueue* m_queue;
+	dxadapter* m_adapter;
+	dxallocator* m_cmd_allocator;
+	dxcmdlist* m_cmdlist;
+	dxfence* m_frame_fence;
+	uint64 m_frame;
+	shaderman m_shaderman;
 
-		struct resource
+	struct resource
 		{
 			dxresource* m_dxresource;
 			dxresource_state m_previous_state;
 		};
 
-		struct swapchain final
+	struct swapchain final
 		{
 			dxswapchain* m_swapchain;
 			dxresource* m_buffers[k_num_swapchain_buffers];
+			dxresource* m_depth;
 			descriptor m_rtvs[k_num_swapchain_buffers];
+			descriptor m_dsv;
 			dxresource* m_uav_proxy_resource;
 			descriptor m_uav_proxy;
+			uint2 m_current_size;
 
 			uint32 get_current_backbuffer_idx() const
 			{
@@ -496,10 +411,10 @@ static result<dxresource*> allocate_gpu_texture(
 				return *m_buffers[get_current_backbuffer_idx() % k_num_swapchain_buffers];
 			}
 		};
-		vector<swapchain> m_swapchains{};
-		umap<void*, uint32> m_swapchain_lookup{};
+	vector<swapchain> m_swapchains{};
+	umap<void*, uint32> m_swapchain_lookup{};
 
-		struct descheap final
+	struct descheap final
 		{
 			dxdescheap* m_dxheap;
 			uint32 m_handle_size;
@@ -541,287 +456,125 @@ static result<dxresource*> allocate_gpu_texture(
 				return {};
 			}
 		};
-		descheap m_descheaps[k_num_descriptor_heaps];
-		descheap& get_descheap(descriptor_heap type)
+	descheap m_descheaps[k_num_descriptor_heaps];
+	descheap& get_descheap(descriptor_heap type)
 		{
 			m_descheaps[(int)type].m_type = type;
 			return m_descheaps[(int)type];
 		}
 
-		struct graphics_pipeline
-		{
-			string m_shaders_filepath;
-			string m_vs_entrypoint;
-			string m_vs_target;
-			string m_ps_entrypoint;
-			string m_ps_target;
-			D3D12_GRAPHICS_PIPELINE_STATE_DESC m_desc;
-			vector<D3D12_INPUT_ELEMENT_DESC> m_input_elements;
-			dxpipeline_graphics* m_dxpipeline;
-			dxsignature* m_dxsignature;
-		};
-		vector<graphics_pipeline> m_pipelines;
+	enum pipeline
+	{
+		cpip_skinning,
+		cpip_num,
 
-		struct meshbuffers final
-		{
-			dxresource* m_vertbuffer;
-			dxresource* m_indbuffer;
-			D3D12_VERTEX_BUFFER_VIEW m_vtb_view;
-			D3D12_INDEX_BUFFER_VIEW m_idx_view;
+		pip_shading,
+		pip_wireframe,
+		pip_ui,
+		pip_num = pip_ui - cpip_num + 2
+	};
 
-			uint32 get_num_vertices() const { return m_vertbuffer ? m_vertbuffer->GetDesc().Width / sizeof(gpu_vertex) : 0; }
-			uint32 get_num_indices() const { return m_indbuffer ? m_indbuffer->GetDesc().Width / sizeof(uint32) : 0; }
-		};
-		umap<mesh_id, meshbuffers> m_mesh_buffers;
-		dxresource* m_instancebuffer;
-		descriptor m_instancebuffer_srv;
-		dxresource* m_constantbuffer;
-		descriptor m_constantbuffer_cbv;
+	static constexpr bool is_pipeline_compute(pipeline pip)
+	{
+		return pip < cpip_num;
+	}
+	static constexpr bool is_pipeline_graphics(pipeline pip)
+	{
+		return pip > cpip_num && pip < pip_num;
+	}
 
-	public:
-		template <typename _restype>
-		_restype make_result(HRESULT res)
-		{
-			if (!FAILED(res)) return _restype::make_success();
-			else
-			{
-				const string error_str = hr_to_string(res);
-				return _restype::make_fail(error_str.c_str());
-			}
-		}
+	struct pipeline_desc final
+	{
+		string m_shaders_filepath;
+		string m_vs_entrypoint;
+		string m_vs_target;
+		string m_ps_entrypoint;
+		string m_ps_target;
+		string m_cs_entrypoint;
+		string m_cs_target;
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC m_desc;
+		D3D12_COMPUTE_PIPELINE_STATE_DESC m_compute_desc;
+		vector<D3D12_INPUT_ELEMENT_DESC> m_input_elements;
+		dxpipeline* m_dxpipeline;
+		dxsignature* m_dxsignature;
+	};
+	vector<pipeline_desc> m_pipelines;
 
-		result<> initialize();
+	struct meshbuffers final
+	{
+		dxresource* m_vertex_stagingbuffer;
+		dxresource* m_index_stagingbuffer;
+		dxresource* m_vertbuffer;
+		dxresource* m_indbuffer;
+		D3D12_VERTEX_BUFFER_VIEW m_vtb_view;
+		D3D12_INDEX_BUFFER_VIEW m_idx_view;
+		bool m_uploaded = false;
 
-		void compile_shaders();
+		uint32 get_num_vertices() const { return m_vertbuffer ? (uint32)(m_vertbuffer->GetDesc().Width / sizeof(gpu_vertex)) : 0; }
+		uint32 get_num_indices() const { return m_indbuffer ? (uint32)(m_indbuffer->GetDesc().Width / sizeof(uint32)) : 0; }
+	};
+	umap<mesh_id, meshbuffers> m_mesh_buffers;
+	dxresource* m_instancebuffer;
+	dxresource* m_instancebuffer_ui;
+	descriptor m_instancebuffer_srv;
+	descriptor m_instancebuffer_ui_srv;
+	dxresource* m_constantbuffer;
+	descriptor m_constantbuffer_cbv;
+	dxresource* m_bonebuffer;
+	descriptor m_bonebuffer_srv;
 
-		void compile_pipelines();
+	struct skeletonbuffers final
+	{
+		dxresource* m_bone_buffer;			// static bone data from content
+		dxresource* m_bone_buffer_staging;	// static bone data from content
+		dxresource* m_skinned_buffer;		// output of the GPU skinning
+		bool m_uploaded = false;
+	};
+	umap<skel_id, skeletonbuffers> m_skel_buffers;
 
-		void cmd_transition_barrier(dxresource& resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
-		{
-			D3D12_RESOURCE_BARRIER barrier{};
-			barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-			barrier.Flags = {};
-			barrier.Transition.pResource = &resource;
-			barrier.Transition.StateAfter = after;
-			barrier.Transition.StateBefore = before;
-			barrier.Transition.Subresource = 0;
-			m_cmdlist->ResourceBarrier(1, &barrier);
-		}
+	struct texture
+	{
+		dxresource* m_staging_resource;
+		dxresource* m_gpu_resource;
+		descriptor m_srv;
 
-		void clear_gpu_heaps()
-		{
-			get_descheap(descriptor_heap::gpu_resource).m_stack_ptr = 0;
-			get_descheap(descriptor_heap::gpu_sampler).m_stack_ptr = 0;
-		}
+		bool m_uploaded = false;
+		uint32 m_gpu_heap_slot = 0;
+	};
+	umap<image_id, texture> m_image_textures;
 
-		D3D12_GPU_DESCRIPTOR_HANDLE push_gpu_resource_descriptor(dxdevice& device, const descriptor& source_descriptor)
-		{
-			descheap& gpu_descheap = get_descheap(descriptor_heap::gpu_resource);
-			dxdescheap* gpu_dx_heap = gpu_descheap.m_dxheap;
+public:
+	result<> initialize();
 
-			// allocate on the gpu heap:
-			uint32 slot = gpu_descheap.allocate().claim();
+	void compile_shaders();
 
-			// get the cpu handle of the new descriptor slot
-			D3D12_CPU_DESCRIPTOR_HANDLE dest_cpu_handle;
-			D3D12_GPU_DESCRIPTOR_HANDLE dest_gpu_handle;
-			gpu_descheap.get_handles(slot, &dest_cpu_handle, &dest_gpu_handle).claim();
+	void compile_pipelines();
 
-			// get the cpu handle of source
-			const descheap& source_descheap = get_descheap(source_descriptor.m_owner);
-			D3D12_CPU_DESCRIPTOR_HANDLE source_cpu_handle;
-			source_descheap.get_handles(source_descriptor.m_heap_idx, &source_cpu_handle).claim();
+	void cmd_transition_barrier(dxresource& resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
 
-			device.CopyDescriptorsSimple(1, dest_cpu_handle, source_cpu_handle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-			return dest_gpu_handle;
-		}
+	void clear_gpu_heaps();
 
-		void render(renderscene& scene, const contentman& contentman);
+	bool push_gpu_resource_descriptor(
+		dxdevice& device, 
+		const descriptor& source_descriptor,
+		uint32& out_gpu_heap_index,
+		D3D12_GPU_DESCRIPTOR_HANDLE& out_gpu_handle);
 
-		struct descriptor_args final
+	void render(renderscene& scene, const contentman& contentman);
+
+	struct descriptor_args final
 		{
 			D3D12_BUFFER_SRV m_buffer_srv{};
 		};
+	result<descriptor> create_resource_descriptor(dxresource& resource, descriptor_type type, bool gpu_readable, const descriptor_args& args = {});
 
-		result<descriptor> create_resource_descriptor(
-			dxresource& resource,
-			descriptor_type type,
-			bool gpu_readable,
-			const descriptor_args& args = {})
-		{
-			using restype = result<descriptor>;
-			restype result;
+	result<> register_window(void* platform_handle);
 
-			if (gpu_readable && !can_gpu_read_descriptor(type))
-				return restype::make_fail("create_resource_descriptor(type, gpu_readable) failed > descriptor of type cannot be gpu_readable!");
-
-			const descriptor_heap heap_type = get_descheap_type(type, gpu_readable);
-
-			// allocate an entry on the target heap, and return the descriptor
-			descheap& heap = get_descheap(heap_type);
-			descriptor new_descriptor;
-			new_descriptor.m_owner = heap_type;
-			new_descriptor.m_type = type;
-			new_descriptor.m_heap_idx = heap.allocate().claim();
-
-			// now get the handles (cpu)
-			D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle;
-			heap.get_handles(new_descriptor.m_heap_idx, &cpu_handle).claim();
-
-			// now create the view using device
-			D3D12_RESOURCE_DESC resource_desc = resource.GetDesc();
-			switch (type)
-			{
-			case descriptor_type::rtv:
-			{
-				D3D12_RENDER_TARGET_VIEW_DESC view_desc{};
-				view_desc.Format = resource_desc.Format;
-				switch (resource_desc.Dimension)
-				{
-				case D3D12_RESOURCE_DIMENSION_BUFFER:		
-					view_desc.ViewDimension = D3D12_RTV_DIMENSION_BUFFER; 
-					break;
-				case D3D12_RESOURCE_DIMENSION_TEXTURE1D:	
-					view_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE1D; 
-					break;
-				case D3D12_RESOURCE_DIMENSION_TEXTURE2D:	
-					view_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D; 
-					view_desc.Texture2D.PlaneSlice = 0;
-					view_desc.Texture2D.MipSlice = 0;
-					break;
-				case D3D12_RESOURCE_DIMENSION_TEXTURE3D:	
-					view_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D; 
-					break;
-				default:
-					return restype::make_fail("unsupported resource dimension!");
-				}
-				m_device->CreateRenderTargetView(&resource, &view_desc, cpu_handle);
-			}break;
-			case descriptor_type::dsv:
-			{
-
-			}break;
-			case descriptor_type::uav:
-			{
-				D3D12_UNORDERED_ACCESS_VIEW_DESC view_desc{};
-				view_desc.Format = resource_desc.Format;
-				switch (resource_desc.Dimension)
-				{
-				case D3D12_RESOURCE_DIMENSION_BUFFER:		
-					view_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER; 
-					break;
-				case D3D12_RESOURCE_DIMENSION_TEXTURE1D:	
-					view_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1D; 
-					break;
-				case D3D12_RESOURCE_DIMENSION_TEXTURE2D:	
-					view_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-					view_desc.Texture2D.MipSlice = 0;
-					view_desc.Texture2D.PlaneSlice = 0;
-					break;
-				case D3D12_RESOURCE_DIMENSION_TEXTURE3D:	
-					view_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D; 
-					break;
-				default:
-					return restype::make_fail("unsupported resource dimension!");
-				}
-				m_device->CreateUnorderedAccessView(&resource, nullptr, &view_desc, cpu_handle);
-			}break;
-			case descriptor_type::cbv:
-			{
-				D3D12_CONSTANT_BUFFER_VIEW_DESC view_desc{};
-				view_desc.BufferLocation = resource.GetGPUVirtualAddress();
-				view_desc.SizeInBytes = resource.GetDesc().Width;
-				m_device->CreateConstantBufferView(&view_desc, cpu_handle);
-			}break;
-			case descriptor_type::srv:
-			{
-				D3D12_SHADER_RESOURCE_VIEW_DESC view_desc{};
-				view_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-				view_desc.Format = resource_desc.Format;
-				switch (resource_desc.Dimension)
-				{
-				case D3D12_RESOURCE_DIMENSION_BUFFER:
-					view_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-					view_desc.Buffer = args.m_buffer_srv;
-					break;
-				case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
-					view_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D;
-					break;
-				case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
-					view_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-					view_desc.Texture2D.PlaneSlice = 0;
-					break;
-				case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
-					view_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
-					break;
-				default:
-					return restype::make_fail("unsupported resource dimension!");
-				}
-				m_device->CreateShaderResourceView(&resource, &view_desc, cpu_handle);
-			}break;
-			case descriptor_type::sampler:
-			{
-
-			}break;
-			}
-
-			return new_descriptor;
-		}
-
-		result<> register_window(void* platform_handle)
-		{
-			using restype = result<>;
-			restype result;
-
-			if (m_swapchain_lookup.contains(platform_handle))
-			{
-				return restype::make_warning("skipping register: window at handle already registered!");
-			}
-
-			const uint2 dimensions = { 640, 480 };
-
-			// make new swapchain
-			m_swapchain_lookup[platform_handle] = (uint32)m_swapchains.size();
-			m_swapchains.push_back({});
-			{
-				DXGI_SWAP_CHAIN_DESC1 scDesc = {};
-				scDesc.BufferCount = k_num_swapchain_buffers;
-				scDesc.Width = dimensions.x;
-				scDesc.Height = dimensions.y;
-				scDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-				scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT | DXGI_USAGE_BACK_BUFFER;
-				scDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-				scDesc.SampleDesc.Count = 1;
-
-				HWND hwnd = (HWND)platform_handle;
-				IDXGISwapChain1* temp_swapchain;
-				result = make_result<restype>(m_factory->CreateSwapChainForHwnd(
-					m_queue,
-					hwnd,
-					&scDesc,
-					nullptr,
-					nullptr,
-					&temp_swapchain));
-
-				m_factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
-				
-				swapchain& target_swapchain = m_swapchains.back();
-				target_swapchain.m_swapchain = (dxswapchain*)temp_swapchain;
-
-				// gather the resources, create the RTVS
-				for (uint32 i = 0u; i < k_num_swapchain_buffers; ++i)
-				{
-					dxresource*& buffer = target_swapchain.m_buffers[i];
-					target_swapchain.m_swapchain->GetBuffer(i, IID_PPV_ARGS(&buffer));
-					target_swapchain.m_rtvs[i] = create_resource_descriptor(*buffer, descriptor_type::rtv, false).claim();
-				}
-
-				// make uav proxy
-				target_swapchain.m_uav_proxy_resource = allocate_gpu_texture(*m_device, 2, { dimensions.x, dimensions.y, 1 }, true, D3D12_RESOURCE_STATE_COPY_SOURCE).claim();
-				target_swapchain.m_uav_proxy = create_resource_descriptor(*target_swapchain.m_uav_proxy_resource, descriptor_type::uav, false).claim();
-			}
-			
-			return {};
-		}
-	};
+private:
+	void process_scene(renderscene& scene, const contentman& cman);
+	void upload_buffers();
+	void reallocate_image_texture(const contentman& cman, image_id id);
+	void reallocate_skeleton_buffers(const contentman& cman, skel_id id);
+	static void populate_vertex_shader_input(renderman::pipeline_desc& pipeline);
+};
 }

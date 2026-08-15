@@ -14,30 +14,9 @@ namespace platform {
 	using window_handle = void*;
 
 #if DF_WINDOWS
-	LRESULT CALLBACK windows_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
-	{
-		switch (msg)
-		{
-		case WM_DESTROY:
-			PostQuitMessage(0);
-			return 0;
+	LRESULT CALLBACK windows_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-		case WM_SIZE:
-			if (wParam != SIZE_MINIMIZED)
-			{
-				UINT width = LOWORD(lParam);
-				UINT height = HIWORD(lParam);
-
-				// call your resize function here...
-				// todo
-			}
-			return 0;
-		}
-
-		return DefWindowProc(hwnd, msg, wParam, lParam);
-	}
-
-	string get_last_error_as_string()
+	inline string get_last_error_as_string()
 	{
 		DWORD error = GetLastError();
 		if (error == 0) return "";
@@ -60,54 +39,9 @@ namespace platform {
 		return message;
 	}
 
-	result<window_handle> create_window(const window_create_args& args)
-	{
-		using restype = result<window_handle>;
-		const wchar_t CLASS_NAME[] = L"MyWindowClass";
-
-		const HINSTANCE current_instance = GetModuleHandle(NULL);
-
-		static bool once = true;
-		if (once)
-		{
-			WNDCLASS wc = {};
-			wc.lpfnWndProc = windows_proc;
-			wc.hInstance = current_instance;
-			wc.lpszClassName = CLASS_NAME;
-			wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-			RegisterClass(&wc);
-			
-			const string error = get_last_error_as_string();
-			if (!error.empty()) return restype::make_fail(error.c_str());
-
-			once = false;
-		}
-
-		HWND hwnd = CreateWindowEx(
-			0,
-			CLASS_NAME,
-			to_wstring(args.m_title).c_str(),
-			WS_OVERLAPPEDWINDOW,
-			CW_USEDEFAULT, CW_USEDEFAULT,
-			args.m_size.x, args.m_size.y,
-			nullptr,
-			nullptr,
-			current_instance,
-			nullptr
-		);
-
-		if (hwnd == nullptr)
-		{
-			const string error = get_last_error_as_string();
-			return restype::make_fail(error.c_str());
-		}
-
-		ShowWindow(hwnd, args.m_show);
-		UpdateWindow(hwnd);
-		return hwnd;
-	}
+	result<window_handle> create_window(const window_create_args& args);
 	
-	void poll_window(window_handle handle, bool& out_quit_requested)
+	inline void poll_window(window_handle handle, bool& out_quit_requested)
 	{
 		MSG msg;
 		while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))

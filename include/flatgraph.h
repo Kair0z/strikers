@@ -149,21 +149,19 @@ public:
 	}
 
 	template <typename _fn>
-	void traverse(node_idx start_node, traverse_mode mode, _fn&& func)
+	void traverse(_fn&& func, node_idx start_node = k_root, traverse_mode mode = traverse_mode::width) const
 	{
-		for (uint32_t i = 0u; i < m_nodes.size(); ++i)
-		{
-			m_nodes[i].m_visited = false;
-		}
+		vector<bool> visited_map{};
+		visited_map.resize(m_nodes.size());
 
 		// first visit start node
-		m_nodes[start_node].m_visited = true;
+		visited_map[start_node] = true;
 		func(start_node);
 
 		if (mode == traverse_mode::width)
 		{
 			std::function<void(node_idx)> traverse_layer;
-			traverse_layer = [this, &traverse_layer, &func](node_idx layer_start)
+			traverse_layer = [this, &traverse_layer, &func, &visited_map](node_idx layer_start)
 				{
 					if (layer_start == k_invalid) return;
 
@@ -172,10 +170,11 @@ public:
 					do
 					{
 						// visit the node
-						node& current_node = m_nodes[current];
-						if (current_node.m_visited == false)
+						if (visited_map[current] == false)
+						{
 							func(current);
-						current_node.m_visited = true;
+						}
+						visited_map[current] = true;
 
 						current = next_sib(current);
 
@@ -217,7 +216,7 @@ private:
 		const node_idx new_idx = (node_idx)m_nodes.size() - 1u;
 		m_nodes.back().m_graph = this;
 		m_nodes.back().m_idx = new_idx;
-		m_first_inactive = m_nodes.size();
+		m_first_inactive = (uint32)m_nodes.size();
 		return new_idx;
 	}
 };

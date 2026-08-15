@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <filesystem>
 #include <unordered_set>
+#include <format>
 
 // windows
 #if DF_WINDOWS
@@ -33,6 +34,7 @@ static const char* k_content_folder = "D:/Git/strikers/content/";
 // common types
 using int32 = int;
 using f32	= float;
+using uint8 = unsigned char;
 using uint32 = uint32_t;
 using uint64 = uint64_t;
 
@@ -70,11 +72,28 @@ inline wstring to_wstring(const string& str)
 	return to_wstring(stringview(str));
 }
 
+inline string to_lowercase(const string& str)
+{
+	string result = str;
+	std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) {
+		return std::tolower(c);
+	});
+	return result;
+}
 inline string normalize_path(const stringview& filepath)
 {
 	std::filesystem::path p = filepath;
-	return p.generic_string();
+	return to_lowercase(p.generic_string());
 }
+
+template <typename _t>
+_t snap_if_tiny(const _t& value)
+{
+	static constexpr _t eps = 0.00001;
+	return value < eps ? (_t)0 : value;
+}
+
+#define format_f3 "{:.1f},{:.1f},{:.1f}"
 
 using mat4x4 = glm::mat4;
 using uint2 = glm::uvec2;
@@ -83,6 +102,7 @@ using uint4 = glm::uvec4;
 using float2 = glm::fvec2;
 using float3 = glm::fvec3;
 using float4 = glm::fvec4;
+using float4x4 = glm::mat4;
 static mat4x4 calculate_view_mat(const mat4x4& camera_transform)
 {
 	return glm::inverse(camera_transform);
@@ -100,14 +120,19 @@ static mat4x4 calculate_transform(const float3& position, const float3& lookAt, 
 	mat4x4 view = glm::lookAtLH(position, lookAt, up);
 	return glm::inverse(view);
 }
+
 struct transform final
 {
 public:
 	mat4x4 m_matrix{ 1 };
 
-	void translate(const float3 delta)
+	void add_position_local(const float3& delta)
 	{
 		m_matrix = glm::translate(m_matrix, delta);
+	}
+	void add_position_world(const float3& delta)
+	{
+		m_matrix = glm::translate(float4x4(1), delta) * m_matrix;
 	}
 	void set_position(const float3& position)
 	{
@@ -131,14 +156,36 @@ public:
 	{
 		return m_matrix[3];
 	}
+	float3 get_forward() const
+	{
+		return glm::normalize(m_matrix[2]);
+	}
+	float3 get_up() const
+	{
+		return glm::normalize(m_matrix[1]);
+	}
+	float3 get_right() const
+	{
+		return glm::normalize(m_matrix[0]);
+	}
 	static transform identity() { return transform{ mat4x4(1) }; }
 };
 
 template <typename _t> using vector = std::vector<_t>;
-template <typename _k, typename _t> using umap = std::unordered_map<_k, _t>;
+template <typename _k, typename _t, typename _h = std::hash<_k>, typename _eq = std::equal_to<_k>> 
+using umap = std::unordered_map<_k, _t, _h, _eq>;
+
+template <typename _fn>
+using func = std::function<_fn>;
+
 template <typename _k, typename _t> using uset = std::unordered_set<_k, _t>;
 using id = uint64;
+using scene_id = uint64;
 using mesh_id = uint64;
+using image_id = uint64;
+using skel_id = uint64;
+using anim_id = uint64;
+using mat_id = uint64;
 static constexpr uint64 k_id_invalid = (id)-1;
 
 template <typename _ex = int32, typename _unex = const char*>
@@ -216,24 +263,6 @@ public:
 		result res{ unex };
 		res.m_flags = warning;
 		return res;
-	}
-};
-
-class logman final
-{
-public:
-	static logman& get()
-	{
-		static logman singleton;
-		return singleton;
-	}
-
-	static void print(const char* fmt, ...)
-	{
-		va_list _ArgList;
-		__crt_va_start(_ArgList, fmt);
-		_vfprintf_l(stdout, fmt, NULL, _ArgList);
-		__crt_va_end(_ArgList);
 	}
 };
 }

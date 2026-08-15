@@ -4,7 +4,7 @@ workspace "strikers"
     language "C++"
     architecture "x64"
     multiprocessorcompile("on")
-    platforms { "win64", "linux" }
+    platforms { "win64" }
 
 project "strikers"
     kind        "ConsoleApp"
@@ -38,13 +38,17 @@ project "strikers"
     includedirs {
         includeDir,
         "../thirdparty/glm/include",
-        "../thirdparty/assimp/include"
+        "../thirdparty/assimp/include",
+        "../thirdparty/pix/include",
+        "../thirdparty/stb/include"
     }
     libdirs {
         "../thirdparty/dxc/lib/",
-        "../thirdparty/assimp/lib/"
+        "../thirdparty/assimp/lib/",
+        "../thirdparty/pix/lib/"
     }
 
+    defines{"DF_PIX"}
     filter "files:**.hlsl"
         buildaction "None"
     filter {}
