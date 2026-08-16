@@ -96,16 +96,22 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
         const aiScene* scene = assimp.ReadFile(string(filepath), flags);
 
         // parse fbx scene asset
-        umap<string, float4x4*> camera_name_to_node_scene_transform{}; // this is necessary because assimp is crazy
+
+        // list all camera-names that want to know their scene_transform (this is necessary because assimp is crazy)
+        umap<string, float4x4*> camera_name_to_node_scene_transform{};
+        vector<camera_id> camera_ids{};
         for (uint32 i = 0u; i < scene->mNumCameras; ++i)
         {
             const auto& camera = scene->mCameras[i];
             camera_name_to_node_scene_transform[camera->mName.C_Str()] = nullptr;
+            camera_ids.push_back(make_camera_id(filepath, i));
         }
 
+        // parse & traverse scene
         const scene_id sc_id = make_scene_id(filepath);
         scene_asset sc_asset{};
         {
+            // traverse the entire scene hierarchy
             func<void(const aiNode&, uint32, const float4x4&)> traverse_node;
             static constexpr uint32 k_invalid = (uint32)-1;
             traverse_node = [&traverse_node, &sc_asset, &filepath, &camera_name_to_node_scene_transform]
@@ -128,11 +134,12 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
                     current_data.m_meshes[i] = make_mesh_id(filepath, current_node.mMeshes[i]);
                 }
 
-                const string node_name_str = string(current_node.mName.C_Str());
-                auto found = camera_name_to_node_scene_transform.find(node_name_str);
+                current_data.m_name = string(current_node.mName.C_Str());
+                
+                auto found = camera_name_to_node_scene_transform.find(current_data.m_name);
                 if (found != camera_name_to_node_scene_transform.cend())
                 {
-                    camera_name_to_node_scene_transform[node_name_str] = new float4x4(scene_transform);
+                    camera_name_to_node_scene_transform[current_data.m_name] = new float4x4(scene_transform);
                 }
 
                 // traverse children
@@ -143,36 +150,46 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             };
             traverse_node(*scene->mRootNode, k_invalid, to_glm(scene->mRootNode->mTransformation));
 
-            for (uint32 i = 0u; i < scene->mNumCameras; ++i)
+            // allocate the scene asset
+            sc_asset.m_cameras = camera_ids;
+            allocate_asset<asset_type::scene>(sc_id, sc_asset, root_id);
+        }
+
+        // parse cameras
+        for (uint32 i = 0u; i < scene->mNumCameras; ++i)
+        {
+            // we only add cameras of which we found a node in the scene hierarchy
+            const auto& camera = scene->mCameras[i];
+            const string camera_name = string(camera->mName.C_Str());
+
+            float4x4 camera_matrix = float4x4{ 1 }; // identity
+            float4x4* camera_scene_transform = camera_name_to_node_scene_transform[camera_name];
+            if (camera_scene_transform != nullptr)
             {
-                // we only add cameras of which we found a node in the scene hierarchy
-                const auto& camera = scene->mCameras[i];
-                const string camera_name = string(camera->mName.C_Str());
-
-                float4x4 *camera_scene_transform = camera_name_to_node_scene_transform[camera_name];
-                if (camera_scene_transform == nullptr)
-                {
-                    continue;
-                }
-
                 // apply scene transform to the original matrix
                 aiMatrix4x4 ai_camera_matrix;
                 camera->GetCameraMatrix(ai_camera_matrix);
-                float4x4 camera_matrix = to_glm(ai_camera_matrix);
+                camera_matrix = to_glm(ai_camera_matrix);
                 camera_matrix = (*camera_scene_transform) * camera_matrix;;
                 delete camera_scene_transform;
-                
+
                 // flip, this is just ugly
                 camera_matrix[0] = -camera_matrix[0];
                 camera_matrix[2] = -camera_matrix[2];
                 // camera_matrix[2][3] = -camera_matrix[2][3];
-
-                scene_asset::camera camera_asset{};
-                camera_asset.m_scene_transform = camera_matrix;
-                sc_asset.m_cameras.push_back(camera_asset);
             }
 
-            allocate_asset<asset_type::scene>(sc_id, sc_asset, root_id);
+            const camera_id cam_id = camera_ids[i];
+            camera_asset asset{};
+            asset.m_camera_id = cam_id;
+            asset.m_scene_transform = camera_matrix;
+            asset.m_aspect_ratio = camera->mAspect;
+            asset.m_clip_near = camera->mClipPlaneFar;
+            asset.m_clip_far = camera->mClipPlaneNear;
+            asset.m_fov_horizontal = camera->mHorizontalFOV;
+            asset.m_ortho_width = camera->mOrthographicWidth;
+            asset.m_name = string(camera->mName.C_Str());
+            allocate_asset<asset_type::camera>(cam_id, asset, root_id);
         }
 
         // parse materials

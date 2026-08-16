@@ -14,6 +14,7 @@ enum class asset_type
 	skeleton,
 	animation,
 	material,
+	camera,
 	num
 };
 
@@ -32,18 +33,24 @@ struct none_asset final
 	int none;
 };
 
+struct camera_asset final
+{
+	camera_id m_camera_id;
+	string m_name;
+	float4x4 m_scene_transform;
+	float m_aspect_ratio;
+	float m_clip_far;
+	float m_clip_near;
+	float m_fov_horizontal;
+	float m_ortho_width;
+};
+
 struct scene_asset final
 {
-	struct camera
-	{
-		float4x4 m_scene_transform;
-		float m_fov;
-	};
-	vector<camera> m_cameras{};
-
 	scene_id m_scene_id{};
 	struct node final
 	{
+		string m_name;
 		float4x4 m_local_transform; // local transform in parent space
 		float4x4 m_scene_transform; // scene space -> model space
 		float4x4 m_scene_transform_inv; // scene space -> model space
@@ -51,6 +58,8 @@ struct scene_asset final
 	};
 	using nodegraph = flatgraph<node>;
 	nodegraph m_graph;
+
+	vector<camera_id> m_cameras;
 
 	bool find_node_with_mesh(const mesh_id& mesh, uint32& out_node_idx)
 	{
@@ -78,6 +87,14 @@ struct scene_asset final
 		}
 		else return false;
 	}
+};
+
+enum class primesh // 'prime' mesh
+{
+	sphere,
+	box,
+	capsule,
+	num
 };
 
 struct mesh_asset final
@@ -188,7 +205,8 @@ class contentman final
 		image_asset,
 		skeleton_asset,
 		animation_asset,
-		material_asset>>;
+		material_asset,
+		camera_asset>>;
 	template <asset_type _t>
 	using asset_id_t = std::tuple_element_t<static_cast<uint64>(_t), std::tuple<
 		uint64,
@@ -197,7 +215,8 @@ class contentman final
 		image_id,
 		skel_id,
 		anim_id,
-		mat_id>>;
+		mat_id,
+		camera_id>>;
 
 	template <asset_type _t>
 	struct typed_assets final
@@ -212,6 +231,7 @@ class contentman final
 	typed_assets<asset_type::skeleton> m_skeleton_assets;
 	typed_assets<asset_type::animation> m_animation_assets;
 	typed_assets<asset_type::material> m_material_assets;
+	typed_assets<asset_type::camera> m_camera_assets;
 
 	template <asset_type _t>
 	const typed_assets<_t>& get_typed_assets() const
@@ -222,6 +242,7 @@ class contentman final
 		else if constexpr (_t == asset_type::skeleton) return m_skeleton_assets;
 		else if constexpr (_t == asset_type::animation) return m_animation_assets;
 		else if constexpr (_t == asset_type::material) return m_material_assets;
+		else if constexpr (_t == asset_type::camera) return m_camera_assets;
 		else return m_none_assets;
 	}
 	template <asset_type _t>
@@ -233,6 +254,7 @@ class contentman final
 		else if constexpr (_t == asset_type::skeleton) return m_skeleton_assets;
 		else if constexpr (_t == asset_type::animation) return m_animation_assets;
 		else if constexpr (_t == asset_type::material) return m_material_assets;
+		else if constexpr (_t == asset_type::camera) return m_camera_assets;
 		else return m_none_assets;
 	}
 
@@ -280,6 +302,11 @@ public:
 			);
 	}
 
+	static mesh_id make_mesh_id(primesh primesh)
+	{
+		return (uint64)primesh;
+	}
+
 	result<mesh_id> find_mesh(const stringview& name) const;
 
 	static image_id make_image_id(const stringview& filepath)
@@ -325,6 +352,18 @@ public:
 		return std::hash<stringview>{}(name);
 	}
 
+	static camera_id make_camera_id(const stringview& filepath, uint32 index)
+	{
+		string copy = normalize_path(filepath);
+		const uint64 hash1 = std::hash<stringview>{}(copy);
+		const uint64 hash2 = std::hash<uint32>{}(index);
+
+		// hash combine (boost-style)
+		return static_cast<skel_id>(
+			hash1 ^ (hash2 + 0x9e3779b9 + (hash1 << 6) + (hash1 >> 2))
+			);
+	}
+
 	template <asset_type _t>
 	bool is_typed_asset_loaded(const asset_id_t<_t>& id) const
 	{
@@ -352,6 +391,9 @@ public:
 
 	mesh_asset const* find_mesh(const mesh_id id) const {
 		return find_typed_asset<asset_type::mesh>(id).claim();
+	}
+	camera_asset const* find_camera(const camera_id id) const {
+		return find_typed_asset<asset_type::camera>(id).claim();
 	}
 	material_asset const* find_material(const mat_id id) const {
 		return find_typed_asset<asset_type::material>(id).claim();

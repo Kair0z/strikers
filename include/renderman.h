@@ -42,7 +42,12 @@ struct gpu_cbuffer
 	float4 m_light_color;
 	float4 m_light_direction;
 };
-
+struct gpu_line_instance
+{
+	float4 m_color;
+	float3 m_point_a;
+	float3 m_point_b;
+};
 class contentman;
 using dxdevice = ID3D12Device;
 using dxswapchain = IDXGISwapChain4;
@@ -111,12 +116,43 @@ public:
 		image_id m_img_basecolor	= k_id_invalid;
 
 		void apply_material(const contentman& cman, const mat_id mat);
+		
+		mesh_instance& transform(const transform& trans)
+		{
+			m_transform = trans;
+			return *this;
+		}
 	};
 
 	struct ui_instance
 	{
 		float4 m_box;
 		image_id m_image;
+	};
+
+	struct line_instance
+	{
+		float4 m_color;
+		float3 m_point_a;
+		float3 m_point_b;
+	};
+
+	struct line_builder
+	{
+		renderscene& m_owner;
+		line_builder(renderscene& owner) : m_owner{ owner } {}
+
+		const line_builder& add_line(const float3& point_a, const float3& point_b, const float4& color) const
+		{
+			line_instance& line = m_owner.add_line_instance();
+			line.m_point_a = point_a;
+			line.m_point_b = point_b;
+			line.m_color = color;
+			return *this;
+		}
+		const line_builder& add_sphere(const transform& transform, const float radius, const float4& color) const;
+		const line_builder& add_box(const transform& transform, const float3& min, const float3& max, const float4& color) const;
+		const line_builder& add_transform(const transform& transform) const;
 	};
 
 	mesh_instance& add_mesh_instance(const mesh_id mesh, const shader shdr)
@@ -131,6 +167,12 @@ public:
 	{
 		m_ui_instances.push_back({});
 		return m_ui_instances.back();
+	}
+
+	line_instance& add_line_instance()
+	{
+		m_line_instances.push_back({});
+		return m_line_instances.back();
 	}
 
 	uint32 get_meshbatch_num_instances(const batch_key& key) const
@@ -152,6 +194,7 @@ public:
 	umap<batch_key, vector<uint32>, batch_key::hash_t, batch_key::equal_t> m_batch_instance_lookup;
 	vector<mesh_instance> m_mesh_instances;
 	vector<ui_instance> m_ui_instances;
+	vector<line_instance> m_line_instances;
 };
 
 enum class shader_type
@@ -470,6 +513,7 @@ class renderman final
 
 		pip_shading,
 		pip_wireframe,
+		pip_lines,
 		pip_ui,
 		pip_num = pip_ui - cpip_num + 2
 	};
@@ -515,9 +559,11 @@ class renderman final
 	};
 	umap<mesh_id, meshbuffers> m_mesh_buffers;
 	dxresource* m_instancebuffer;
-	dxresource* m_instancebuffer_ui;
 	descriptor m_instancebuffer_srv;
+	dxresource* m_instancebuffer_ui;
 	descriptor m_instancebuffer_ui_srv;
+	dxresource* m_instancebuffer_lines;
+	descriptor m_instancebuffer_lines_srv;
 	dxresource* m_constantbuffer;
 	descriptor m_constantbuffer_cbv;
 	dxresource* m_bonebuffer;

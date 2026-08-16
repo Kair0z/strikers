@@ -23,6 +23,7 @@ static const char* k_cs_target = "cs_6_8";
 static const char* k_ui_shader_filepath = "D:/Git/strikers/hlsl/ui.hlsl";
 static const char* k_shading_shader_filepath = "D:/Git/strikers/hlsl/shading.hlsl";
 static const char* k_skinning_shader_filepath = "D:/Git/strikers/hlsl/skinning.hlsl";
+static const char* k_lines_shader_filepath = "D:/Git/strikers/hlsl/lines.hlsl";
 
 namespace strikers {
 static uint64 calculate_format_bytesize(DXGI_FORMAT format)
@@ -303,6 +304,10 @@ void renderman::compile_shaders()
 		k_ps_target, *m_device).claim();
 	m_shaderman.compile_shader("D:/Git/strikers/hlsl/skinning.hlsl", "main_cs",
 		k_cs_target, *m_device).claim();
+	m_shaderman.compile_shader("D:/Git/strikers/hlsl/lines.hlsl", "main_vs",
+		k_vs_target, *m_device).claim();
+	m_shaderman.compile_shader("D:/Git/strikers/hlsl/lines.hlsl", "main_ps",
+		k_ps_target, *m_device).claim();
 	
 	compile_pipelines();
 }
@@ -523,7 +528,65 @@ void renderman::compile_pipelines()
 			ui_pipeline.m_desc.BlendState.RenderTarget[i].RenderTargetWriteMask = 0xf;
 		}
 	}
+	// configure lines pipeline
+	{
+		pipeline_desc& pipeline = m_pipelines[pip_lines];
+		pipeline.m_shaders_filepath = k_lines_shader_filepath;
+		pipeline.m_ps_entrypoint = "main_ps";
+		pipeline.m_vs_entrypoint = "main_vs";
+		pipeline.m_ps_target = k_ps_target;
+		pipeline.m_vs_target = k_vs_target;
+		pipeline.m_desc = {};
 
+		pipeline.m_desc.InputLayout.NumElements = (uint32)pipeline.m_input_elements.size();
+		pipeline.m_desc.InputLayout.pInputElementDescs = pipeline.m_input_elements.data();
+		pipeline.m_desc.BlendState.AlphaToCoverageEnable = false;
+		pipeline.m_desc.BlendState.IndependentBlendEnable = false;
+		pipeline.m_desc.DepthStencilState.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
+		pipeline.m_desc.DepthStencilState.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
+		pipeline.m_desc.DepthStencilState.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+		pipeline.m_desc.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
+		pipeline.m_desc.DepthStencilState.BackFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
+		pipeline.m_desc.DepthStencilState.BackFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+		pipeline.m_desc.DepthStencilState.BackFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
+		pipeline.m_desc.DepthStencilState.DepthEnable = true;
+		pipeline.m_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+		pipeline.m_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+		pipeline.m_desc.DepthStencilState.StencilEnable = false;
+		pipeline.m_desc.DepthStencilState.StencilReadMask = 0;
+		pipeline.m_desc.DepthStencilState.StencilWriteMask = 0;
+		pipeline.m_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+		pipeline.m_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+		pipeline.m_desc.RasterizerState.AntialiasedLineEnable = false;
+		pipeline.m_desc.RasterizerState.ConservativeRaster;
+		pipeline.m_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+		pipeline.m_desc.RasterizerState.DepthBias = 0;
+		pipeline.m_desc.RasterizerState.DepthBiasClamp = 0;
+		pipeline.m_desc.RasterizerState.DepthClipEnable = false;
+		pipeline.m_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+		pipeline.m_desc.RasterizerState.ForcedSampleCount;
+		pipeline.m_desc.RasterizerState.FrontCounterClockwise = false;
+		pipeline.m_desc.RasterizerState.MultisampleEnable;
+		pipeline.m_desc.RasterizerState.SlopeScaledDepthBias;
+		pipeline.m_desc.SampleDesc.Count = 1;
+		pipeline.m_desc.SampleDesc.Quality = 0;
+		pipeline.m_desc.SampleMask = 0xFFFFFFFF;
+		pipeline.m_desc.NumRenderTargets = 1;
+		for (uint32 i = 0u; i < pipeline.m_desc.NumRenderTargets; ++i)
+		{
+			pipeline.m_desc.RTVFormats[i] = DXGI_FORMAT_R8G8B8A8_UNORM;
+			pipeline.m_desc.BlendState.RenderTarget[i].BlendEnable = TRUE;
+			pipeline.m_desc.BlendState.RenderTarget[i].LogicOpEnable = FALSE;
+			pipeline.m_desc.BlendState.RenderTarget[i].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+			pipeline.m_desc.BlendState.RenderTarget[i].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+			pipeline.m_desc.BlendState.RenderTarget[i].BlendOp = D3D12_BLEND_OP_ADD;
+			pipeline.m_desc.BlendState.RenderTarget[i].SrcBlendAlpha = D3D12_BLEND_ONE;
+			pipeline.m_desc.BlendState.RenderTarget[i].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+			pipeline.m_desc.BlendState.RenderTarget[i].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+			pipeline.m_desc.BlendState.RenderTarget[i].LogicOp = D3D12_LOGIC_OP_NOOP;
+			pipeline.m_desc.BlendState.RenderTarget[i].RenderTargetWriteMask = 0xf;
+		}
+	}
 	// here we create the actual dx12 stuff
 	for (uint32 i = 0u; i < m_pipelines.size(); ++i)
 	{
@@ -813,8 +876,6 @@ void renderman::render(renderscene& scene, const contentman& cman)
 	// shading passes: pip_shading | pip_wireframe
 	if (!scene.m_mesh_instances.empty() && !scene.m_batch_instance_lookup.empty())
 	{
-		PIXScopedEvent(m_cmdlist, 0u, "draws");
-		
 		// update instance buffer
 		map_resource<gpu_instance>(*m_instancebuffer, [this, &scene](gpu_instance* instance)
 		{
@@ -844,10 +905,18 @@ void renderman::render(renderscene& scene, const contentman& cman)
 			pip_shading,
 			pip_wireframe
 		};
+		static const char* k_shader_names[]
+		{
+			"pip_shading",
+			"pip_wireframe"
+		};
 
 		// for each shader, draw a bunch of shaded instances
 		for (uint32 i = 0u; i < k_num_shaders; ++i)
 		{
+			const string scope_name = std::format("[{}]", k_shader_names[i]);
+			PIXScopedEvent(m_cmdlist, 0u, scope_name.c_str());
+
 			m_cmdlist->SetPipelineState(m_pipelines[k_pipelines[i]].m_dxpipeline);
 			m_cmdlist->SetGraphicsRootSignature(m_pipelines[k_pipelines[i]].m_dxsignature);
 			m_cmdlist->SetGraphicsRootConstantBufferView(0, m_constantbuffer->GetGPUVirtualAddress());
@@ -909,6 +978,26 @@ void renderman::render(renderscene& scene, const contentman& cman)
 		}
 	}
 
+	// line passes: pip_lines
+	if (!scene.m_line_instances.empty())
+	{
+		PIXScopedEvent(m_cmdlist, 0u, "lines");
+		m_cmdlist->SetPipelineState(m_pipelines[pip_lines].m_dxpipeline);
+		m_cmdlist->SetGraphicsRootSignature(m_pipelines[pip_lines].m_dxsignature);
+
+		// update lines instance buffer
+		const uint32 num_instances = (uint32)scene.m_line_instances.size();
+		map_resource<gpu_line_instance>(*m_instancebuffer_lines, [this, &scene, num_instances](gpu_line_instance* instance)
+		{
+			memcpy(instance, scene.m_line_instances.data(), sizeof(gpu_line_instance) * num_instances);
+		});
+
+		m_cmdlist->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_LINELIST);
+		m_cmdlist->SetGraphicsRootConstantBufferView(0, m_constantbuffer->GetGPUVirtualAddress());
+		m_cmdlist->SetGraphicsRootShaderResourceView(1, m_instancebuffer_lines->GetGPUVirtualAddress());
+		m_cmdlist->DrawInstanced(2, num_instances, 0, 0);
+	}
+
 	// ui passes: pip_ui
 	if (!scene.m_ui_instances.empty())
 	{
@@ -921,6 +1010,7 @@ void renderman::render(renderscene& scene, const contentman& cman)
 		const uint32 num_instances = (uint32)scene.m_ui_instances.size();
 		map_resource<gpu_ui_instance>(*m_instancebuffer_ui, [this, &scene, num_instances](gpu_ui_instance* instance)
 		{
+			memcpy(instance, scene.m_ui_instances.data(), sizeof(gpu_ui_instance) * num_instances);
 			for (const auto& cpu_instance : scene.m_ui_instances)
 			{
 				if (m_image_textures.contains(cpu_instance.m_image))
@@ -929,7 +1019,6 @@ void renderman::render(renderscene& scene, const contentman& cman)
 				}
 				instance++;
 			}
-			memcpy(instance, scene.m_ui_instances.data(), sizeof(gpu_ui_instance) * num_instances);
 		});
 
 		m_cmdlist->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1036,6 +1125,21 @@ void renderman::process_scene(renderscene& scene, const contentman& cman)
 			srv_builder.m_buffer_srv.NumElements = num_mesh_instances;
 			srv_builder.m_buffer_srv.StructureByteStride = sizeof(gpu_instance);
 			m_instancebuffer_srv = create_resource_descriptor(*m_instancebuffer, descriptor_type::srv, false, srv_builder).claim();
+		}
+	}
+	if (!scene.m_line_instances.empty())
+	{
+		const uint32 num_lines = (uint32)scene.m_line_instances.size();
+		const uint64 bytesize = sizeof(gpu_line_instance) * num_lines;
+		if (m_instancebuffer_lines == nullptr || m_instancebuffer_lines->GetDesc().Width < bytesize)
+		{
+			release_if_valid(m_instancebuffer_lines);
+			m_instancebuffer_lines = allocate_gpu_buffer(*m_device, bytesize, sizeof(gpu_line_instance), false, D3D12_RESOURCE_STATE_COMMON, D3D12_HEAP_TYPE_UPLOAD).claim();
+
+			descriptor_args srv_builder{};
+			srv_builder.m_buffer_srv.NumElements = num_lines;
+			srv_builder.m_buffer_srv.StructureByteStride = sizeof(gpu_line_instance);
+			m_instancebuffer_lines_srv = create_resource_descriptor(*m_instancebuffer_lines, descriptor_type::srv, false, srv_builder).claim();
 		}
 	}
 }
@@ -1499,4 +1603,78 @@ void renderscene::mesh_instance::apply_material(const contentman& cman, const ma
 	}
 }
 
+const renderscene::line_builder& renderscene::line_builder::add_sphere(const transform& transform, const float radius, const float4& color) const
+{
+	constexpr float PI = 3.14159265359f;
+
+	// Latitude rings
+	const uint32 rings = 12;
+	const uint32 segments = 12;
+	const uint32 num_lines = (2 * rings - 1) * segments;
+	m_owner.m_line_instances.reserve(m_owner.m_line_instances.size() + num_lines);
+
+	float4 p0, p1;
+	for (uint32 i = 1; i < rings; ++i)
+	{
+		float phi = PI * i / rings;
+		float y = std::cos(phi) * radius;
+		float ringRadius = std::sin(phi) * radius;
+		for (uint32 j = 0; j < segments; ++j)
+		{
+			float a0 = 2.0f * PI * j / segments;
+			float a1 = 2.0f * PI * (j + 1) / segments;
+			p0 = transform.m_matrix * float4{ ringRadius * std::cos(a0), y, ringRadius * std::sin(a0), 1.0f };
+			p1 = transform.m_matrix * float4{ ringRadius * std::cos(a1), y, ringRadius * std::sin(a1), 1.0f };
+			add_line(p0, p1, color);
+		}
+	}
+	for (uint32 j = 0; j < segments; ++j) {
+		float theta0 = 2.0f * PI * j / segments;
+		float theta1 = 2.0f * PI * (j + 1) / segments;
+		for (uint32 i = 0; i < rings; ++i) {
+			float phi0 = PI * i / rings;
+			float phi1 = PI * (i + 1) / rings;
+			p0 = transform.m_matrix * float4{ radius * std::sin(phi0) * std::cos(theta0), radius * std::cos(phi0), radius * std::sin(phi0) * std::sin(theta0), 1.0f};
+			p1 = transform.m_matrix * float4{ radius * std::sin(phi1) * std::cos(theta0), radius * std::cos(phi1), radius * std::sin(phi1) * std::sin(theta0), 1.0f};
+			add_line(p0, p1, color);
+		}
+	}
+	return *this;
+}
+const renderscene::line_builder& renderscene::line_builder::add_box(const transform& transform, const float3& min, const float3& max, const float4& color) const
+{
+	const float3 corners[8] =
+	{
+		{ min.x, min.y, min.z },
+		{ max.x, min.y, min.z },
+		{ max.x, max.y, min.z },
+		{ min.x, max.y, min.z },
+		{ min.x, min.y, max.z },
+		{ max.x, min.y, max.z },
+		{ max.x, max.y, max.z },
+		{ min.x, max.y, max.z },
+	};
+	constexpr uint32 edges[][2] =
+	{
+		{ 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 }, // bottom
+		{ 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 }, // top
+		{ 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 }, // sides
+	};
+
+	m_owner.m_line_instances.reserve(m_owner.m_line_instances.size() + 12);
+	for (const auto& [a, b] : edges)
+	{
+		add_line(transform.m_matrix * float4(corners[a], 1), transform.m_matrix * float4(corners[b], 1), color);
+	}
+	return *this;
+}
+const renderscene::line_builder& renderscene::line_builder::add_transform(const transform& transform) const
+{
+	m_owner.m_line_instances.reserve(m_owner.m_line_instances.size() + 3);
+	
+	add_line(transform.m_matrix * float4(0,0,0,1), transform.m_matrix * float4(1, 0, 0, 1), float4(1,0,0,1));
+	add_line(transform.m_matrix * float4(0,0,0,1), transform.m_matrix * float4(0, 1, 0, 1), float4(0,1,0,1));
+	add_line(transform.m_matrix * float4(0,0,0,1), transform.m_matrix * float4(0, 0, 1, 1), float4(0,0,1,1));
+	return *this;
+}
 }

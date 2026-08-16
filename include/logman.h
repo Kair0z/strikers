@@ -17,4 +17,12 @@ public:
 		OutputDebugStringA(formatted.c_str());
 	}
 };
+
+#define log_with_cooldown(delta, cd, mssg, ...) \
+	{ \
+	static float s_timer = 0.0f; \
+	s_timer -= delta; \
+	if (s_timer < 0.0f) logman::log(mssg, __VA_ARGS__), s_timer = cd;\
+	}
+
 }

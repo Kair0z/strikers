@@ -45,6 +45,14 @@ LRESULT CALLBACK windows_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	case WM_RBUTTONDOWN:	input.write_button_state(inputman::button::rmouse, true); break;
 	case WM_RBUTTONUP:		input.write_button_state(inputman::button::rmouse, false); break;
 	
+	case WM_MOUSEMOVE:
+	case WM_MOUSEHOVER:
+	{
+		int x = static_cast<short>(lParam & 0xFFFF);
+		int y = static_cast<short>((lParam >> 16) & 0xFFFF);
+		input.write_mouse_position(float2(x, y));
+		break;
+	};
 	case WM_SIZE:
 		if (wParam != SIZE_MINIMIZED)
 		{

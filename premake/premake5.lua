@@ -40,12 +40,14 @@ project "strikers"
         "../thirdparty/glm/include",
         "../thirdparty/assimp/include",
         "../thirdparty/pix/include",
-        "../thirdparty/stb/include"
+        "../thirdparty/stb/include",
+        "../thirdparty/box3d/include",
     }
     libdirs {
         "../thirdparty/dxc/lib/",
         "../thirdparty/assimp/lib/",
-        "../thirdparty/pix/lib/"
+        "../thirdparty/pix/lib/",
+        "../thirdparty/box3d/lib/",
     }
 
     defines{"DF_PIX"}
