@@ -28,7 +28,7 @@ StructuredBuffer<instance> t_instances : register(t0);
 
 [Shader("vertex")]
 ps_input main_vs(uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
-{   
+{
     ps_input output;
     instance inst = t_instances[instance_id];
     output.position = (vertex_id == 0 ? float4(inst.point_a,1) : float4(inst.point_b,1));

@@ -3,10 +3,42 @@
 
 namespace strikers
 {
-command::command(const char* name, const char* default_value)
-    : m_name{ name }, m_default_value{ default_value }, m_value{ default_value }
+command cm_log_cmds("log.clear", "0", command::flags::oneshot);
+
+command::command(const char* name, const char* default_value, flags flg)
+    : m_name{ name }, m_default_value{ default_value }, m_value{ default_value }, m_flags{flg}
 {
     commandman::get().register_command(this);
+}
+
+void command::set_value(const string& value)
+{
+    if (cm_log_cmds.get_value() > 0) 
+        logman::log("cmd.{}({})", m_name, value);
+
+    m_value = value;
+    if (m_flags & flags::oneshot)
+    {
+        m_lifetime = 2;
+    }
+}
+
+void command::set_to_default()
+{
+    set_value(m_default_value);
+}
+
+void command::tick()
+{
+    if (m_lifetime >= 0)
+    {
+        m_lifetime--;
+        if (m_lifetime == 0)
+        {
+            // revert to default
+            m_value = m_default_value;
+        }
+    }
 }
 
 void commandman::register_command(command* cmd)
@@ -66,12 +98,21 @@ void commandman::command_script(const stringview& filepath)
             auto found = m_commands.find(cmd.m_name);
             if (found != m_commands.cend())
             {
-                logman::log("cmd.{}({})", cmd.m_name, cmd.m_arguments[0]);
-                found->second->m_value = cmd.m_arguments[0];
+                found->second->set_value(cmd.m_arguments[0]);
             }
         }
 
         m_last_command_script_check = current_time;
+    }
+}
+
+void commandman::tick()
+{
+    command_script("D:/Git/strikers/commands.md");
+
+    for (auto& cmd : m_commands)
+    {
+        cmd.second->tick();
     }
 }
 }

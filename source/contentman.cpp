@@ -208,6 +208,7 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
                     out_id = make_image_id(full_filepath.c_str());
                     return true;
                 }
+                else return false;
             }
             else return false;
         };

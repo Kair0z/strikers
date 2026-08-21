@@ -12,6 +12,7 @@
 #include <fstream>
 #include <optional>
 #include <chrono>
+#include <stdlib.h>
 
 // windows
 #if DF_WINDOWS
@@ -33,7 +34,10 @@
 namespace strikers {
 
 // constants
-static const char* k_content_folder = "D:/Git/strikers/content/";
+#define DF_FOLDER_CONTENT "D:/Git/strikers/content/"
+#define DF_FOLDER_SHADERS "D:/Git/strikers/hlsl/"
+static const char* k_content_folder = DF_FOLDER_CONTENT;
+static const char* k_shaders_folder = DF_FOLDER_SHADERS;
 
 // common types
 using int32 = int;
@@ -111,6 +115,7 @@ using float3 = glm::fvec3;
 using float4 = glm::fvec4;
 using float4x4 = glm::mat4;
 using rotation = glm::quat;
+using sphere = float4; //
 static mat4x4 calculate_view_mat(const mat4x4& camera_transform)
 {
 	return glm::inverse(camera_transform);
@@ -297,6 +302,74 @@ using mat_id = uint64;
 using camera_id = uint64;
 static constexpr uint64 k_id_invalid = (id)-1;
 
+enum class logcolor
+{
+	white,
+	red,
+	blue,
+	green,
+	yellow,
+	num
+};
+
+class logman final
+{
+	inline static int s_curr_lifetime = -1;
+	inline static logcolor s_curr_color;
+	inline static logcolor s_prev_color;
+
+public:
+	static void color(logcolor clr, int num_logs = -1)
+	{
+		s_curr_lifetime = num_logs;
+		s_prev_color = s_curr_color;
+		s_curr_color = clr;
+
+#if DF_WINDOWS
+		static const int k_color_remap[]
+		{
+			// https://cplusplus.com/forum/beginner/77879/
+			15,
+			4,
+			9,
+			10,
+			14
+		};
+		::SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), k_color_remap[(int)s_curr_color]);
+#endif
+	}
+	static void prev_color()
+	{
+		color(s_prev_color);
+	}
+
+	template<typename... _args>
+	static void log(const stringview& fmt, _args&&... args)
+	{
+		static bool first = true;
+		if (first) color(s_curr_color), first = false;
+
+		std::string formatted = "[strk] ";
+		formatted += std::vformat(fmt, std::make_format_args(args...));
+		formatted += "\n";
+		std::cout << formatted;
+		OutputDebugStringA(formatted.c_str());
+
+		if (s_curr_lifetime)
+		{
+			--s_curr_lifetime;
+			if (s_curr_lifetime == 0) prev_color();
+		}
+	}
+};
+
+#define log_with_cooldown(delta, cd, mssg, ...) \
+	{ \
+	static float s_timer = 0.0f; \
+	s_timer -= delta; \
+	if (s_timer < 0.0f) logman::log(mssg, __VA_ARGS__), s_timer = cd;\
+	}
+
 template <typename _ex = int32, typename _unex = const char*>
 class result final
 {
@@ -305,7 +378,9 @@ class result final
 	#define DF_RESULT_CHECK								\
     do {												\
         if (m_flags == error) {							\
-            fprintf(stderr, "result error: %s\n", m_unexpected); \
+			logman::color(logcolor::red);				\
+            logman::log("error: {}", m_unexpected);		\
+			logman::prev_color();						\
             abort();									\
         }												\
     } while (0);

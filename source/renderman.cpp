@@ -20,10 +20,10 @@
 static const char* k_vs_target = "vs_6_8";
 static const char* k_ps_target = "ps_6_8";
 static const char* k_cs_target = "cs_6_8";
-static const char* k_ui_shader_filepath = "D:/Git/strikers/hlsl/ui.hlsl";
-static const char* k_shading_shader_filepath = "D:/Git/strikers/hlsl/shading.hlsl";
-static const char* k_skinning_shader_filepath = "D:/Git/strikers/hlsl/skinning.hlsl";
-static const char* k_lines_shader_filepath = "D:/Git/strikers/hlsl/lines.hlsl";
+static const char* k_ui_shader_filepath			= DF_FOLDER_SHADERS "ui.hlsl";
+static const char* k_shading_shader_filepath	= DF_FOLDER_SHADERS "shading.hlsl";
+static const char* k_skinning_shader_filepath	= DF_FOLDER_SHADERS "skinning.hlsl";
+static const char* k_lines_shader_filepath		= DF_FOLDER_SHADERS "lines.hlsl";
 
 namespace strikers {
 static uint64 calculate_format_bytesize(DXGI_FORMAT format)
@@ -1311,7 +1311,7 @@ void renderman::reallocate_image_texture(const contentman& cman, image_id id)
 			for (uint64 p = 0u; p < image_data.calculate_num_pixels(); ++p)
 				for (uint64 c = 0u; c < image_data.m_num_channels; ++c)
 				{
-					dest[(p * 4) + c] = image_data.get_pixel_channel_value(p, c);
+					dest[(p * 4) + c] = image_data.get_pixel_channel_value(p, (uint32)c);
 				}
 		}).claim();
 

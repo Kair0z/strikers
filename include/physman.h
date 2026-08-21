@@ -38,16 +38,24 @@ public:
 
     enum class body_shape
     {
+        noshape,
         cube,
         sphere,
+        capsule,
         num
+    };
+
+    struct create_shape_args final
+    {
+        body_shape m_type;
+        float4 m_sphere;
     };
 
     struct create_body_args final
     {
-        body_shape m_shape = body_shape::cube;
         body_flags m_flags = body_flags::none;
         transform m_transform = {};
+        create_shape_args m_shape_args;
     };
 
     struct body final
@@ -69,6 +77,8 @@ public:
 
     void set_body_transform(const body_id id, const transform& transform) const;
 
+    void set_body_shape(const body_id id, const create_shape_args& args, uint32 slot = 0) const;
+    
     enum class force_type
     {
         force,

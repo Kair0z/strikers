@@ -32,24 +32,39 @@ transform translate(const b3WorldTransform& trans)
 		translate(trans.q),
 		{ 1,1,1 });
 }
+b3Sphere translate(const float4& sphere)
+{
+	return b3Sphere{ .center = {sphere.x, sphere.y, sphere.z}, .radius = sphere.w };
+}
+float4 translate(const b3HexColor& color)
+{
+	return {
+		((color >> 16) & 0xFF) / 255.0f, // R = 240
+		((color >> 8) & 0xFF) / 255.0f, // G = 248
+		((color >> 0) & 0xFF) / 255.0f, // B = 255
+		1.0f                              // A
+	};
+}
+static void* b3CreateDebugShape(const b3DebugShape* debugShape, void* userContext)
+{
+	return new b3DebugShape(*debugShape);
+}
+static void b3DestroyDebugShape(void* userShape, void* userContext)
+{
+	delete ((b3DebugShape*)userShape);
+}
+
 void physman::initialize()
 {
 	b3WorldDef world_def = b3DefaultWorldDef();
 	world_def.gravity = { 0, -1, 0 };
+	world_def.createDebugShape = b3CreateDebugShape;
+	world_def.destroyDebugShape = b3DestroyDebugShape;
 	m_world = b3CreateWorld(&world_def);
 }
 
 void physman::tick()
 {
-	if (cm_phys_debug_disable.get_value() > 0)
-		return;
-
-	float timeStep = 1.0f / 60.0f;
-	int num_substeps = 4;
-	for (uint32 i = 0u; i < cm_phys_timestep.get_value<int>(); ++i)
-	{
-		b3World_Step(m_world, timeStep, num_substeps);
-	}
 }
 
 physman::body_id physman::create_body(const create_body_args& args)
@@ -57,7 +72,7 @@ physman::body_id physman::create_body(const create_body_args& args)
 	body new_body{};
 	b3BodyDef def = b3DefaultBodyDef();
 	def.type = b3_staticBody;
-
+	
 	if ((uint32)args.m_flags & (uint32)body_flags::dynamic)
 	{
 		def.type = b3_dynamicBody;
@@ -71,37 +86,34 @@ physman::body_id physman::create_body(const create_body_args& args)
 	
 	const body_id id = b3CreateBody(m_world, &def);
 	
-	// build the shape
+	// create shape
+	b3ShapeDef shape_def = b3DefaultShapeDef();
+	shape_def.density = 1 * 10;
+	shape_def.baseMaterial.friction = 1.0f;
+	switch (args.m_shape_args.m_type)
 	{
-		b3ShapeDef shape_def = b3DefaultShapeDef();
-		shape_def.density = 1;
-		shape_def.baseMaterial.friction = 0.3f;
-
-		switch (args.m_shape)
-		{
-		case body_shape::cube:
-		{
-			b3HullData* hull = nullptr;
-			b3BoxHull box_hull;
-			box_hull = b3MakeCubeHull(1);
-			hull = &box_hull.base;
-			new_body.m_shape = b3CreateHullShape(id, &shape_def, hull);
-		} break;
-
-		case body_shape::sphere:
-		{
-			b3Sphere sphere{};
-			sphere.center = def.position;
-			sphere.radius = 2.0f;
-			new_body.m_shape = b3CreateSphereShape(id, &shape_def, &sphere);
-		} break;
-		}
+	case body_shape::cube:
+	{
+		b3HullData* hull = nullptr;
+		b3BoxHull box_hull;
+		box_hull = b3MakeCubeHull(1);
+		hull = &box_hull.base;
+		b3CreateHullShape(id, &shape_def, hull);
+	} break;
+	case body_shape::sphere:
+	{
+		b3Sphere sphere = translate(args.m_shape_args.m_sphere);
+		b3CreateSphereShape(id, &shape_def, &sphere);
+	} break;
+	default:
+	case body_shape::noshape:
+		break;
 	}
 	
 	new_body.m_id = id;
 	new_body.m_create_args = args;
 	m_bodies.push_back(new_body);
-	m_body_id_to_index[id] = m_bodies.size() - 1u;
+	m_body_id_to_index[id] = (uint32)m_bodies.size() - 1u;
 	return id;
 }
 
@@ -126,6 +138,28 @@ void physman::set_body_transform(const body_id id, const transform& transform) c
 		b3Body_SetTransform(id, 
 			translate(transform.get_position()), 
 			translate(transform.get_rotation()));
+	}
+}
+
+void physman::set_body_shape(const body_id id, const create_shape_args& args, uint32 slot) const
+{
+	auto found = m_body_id_to_index.find(id);
+	if (found != m_body_id_to_index.cend())
+	{
+		if (slot < (uint32)b3Body_GetShapeCount(id))
+		{
+			b3ShapeId shape_id{};
+			b3Body_GetShapes(id, &shape_id, 1);
+			switch (args.m_type)
+			{
+			case body_shape::sphere:
+			{
+				b3Sphere sphere = translate(args.m_sphere);
+				b3Shape_SetSphere(shape_id, &sphere);
+			}break;
+			}
+			
+		}
 	}
 }
 
@@ -179,9 +213,26 @@ void physman::debug_draw(const db_draw& args, renderscene& scene)
 {
 	b3DebugDraw debug_draw = b3DefaultDebugDraw();
 	
-	debug_draw.DrawShapeFcn = [](void* shape, b3WorldTransform transform, b3HexColor hex_color, void* context)
+	debug_draw.DrawShapeFcn = [](void* shape, b3WorldTransform b3_trans, b3HexColor hex_color, void* context)
 	{
+		b3DebugShape* dbg_shape = (b3DebugShape*)shape;
 		renderscene& scene = (*(renderscene*)context);
+		renderscene::line_builder lines{ scene };
+
+		transform trans = transform::build(
+			translate(b3_trans.p), 
+			translate(b3_trans.q),
+			float3(1, 1, 1));
+
+		switch (dbg_shape->type)
+		{
+		case b3_sphereShape:
+			lines.add_sphere(trans, dbg_shape->sphere->radius, translate(hex_color));
+			break;
+		case b3_hullShape:
+			break;
+		}
+		shape;
 	};
 	debug_draw.DrawSegmentFcn = [](b3Pos p1, b3Pos p2, b3HexColor color, void* context)
 	{
@@ -198,23 +249,16 @@ void physman::debug_draw(const db_draw& args, renderscene& scene)
 	debug_draw.DrawSphereFcn = [](b3Pos p, float radius, b3HexColor color, float alpha, void* context) 
 	{
 		renderscene& scene = (*(renderscene*)context);
-		renderscene::line_builder lines{ scene };
-
-		transform trans = transform::build(
-			translate(p),
-			rotation{},
-			float3(1, 1, 1));
-		lines.add_sphere(trans, radius, float4(1,1,1,1));
 	};
 	debug_draw.DrawCapsuleFcn = [](b3Pos p1, b3Pos p2, float radius, b3HexColor color, float alpha, void* context)
 	{
 		renderscene& scene = (*(renderscene*)context);
 	};
+#if 0
 	debug_draw.DrawBoundsFcn = [](b3AABB aabb, b3HexColor color, void* context)
 	{
 		renderscene& scene = (*(renderscene*)context);
 		renderscene::line_builder lines{ scene };
-		
 		transform trans = transform::identity();
 		trans.set_scale(100);
 		lines.add_box(trans,
@@ -222,6 +266,7 @@ void physman::debug_draw(const db_draw& args, renderscene& scene)
 			translate(aabb.upperBound),
 			{1,1,1,1});
 	};
+#endif
 	debug_draw.DrawBoxFcn = [](b3Vec3 extents, b3WorldTransform transform, b3HexColor color, void* context)
 	{
 		renderscene& scene = (*(renderscene*)context);

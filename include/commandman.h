@@ -2,17 +2,24 @@
 #include "common.h"
 
 namespace strikers {
+
 class command
 {
-	friend class commandman;
-	string m_name;
-	string m_default_value;
-	string m_value;
 public:
-	command(const char* name, const char* default_value);
+	enum flags
+	{
+		none = 0,
+		oneshot = (1 << 0),
+	};
+
+	command(const char* name, const char* default_value, flags flg = none);
 	const string& name() const { return m_name; }
 	const string& default_value() const { return m_default_value; }
 	const string& value() const { return m_value; }
+
+	void set_to_default();
+	void tick();
+	void set_value(const string& value);
 
 	template <typename _t = float>
 	_t get_value() const
@@ -24,6 +31,14 @@ public:
 	{
 		return (_t)std::stof(m_value);
 	}
+
+private:
+	friend class commandman;
+	string m_name;
+	string m_default_value;
+	string m_value;
+	flags m_flags;
+	int m_lifetime = -1;
 };
 
 class commandman

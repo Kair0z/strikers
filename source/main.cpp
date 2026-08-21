@@ -11,6 +11,9 @@ using namespace strikers;
 extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 619; }
 extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\"; }
 
+command cm_log_fps("log.fps", "1");
+command cm_log_clear("log.clear", "0", command::flags::oneshot);
+
 int main()
 {
     windowman wman{};
@@ -39,30 +42,39 @@ int main()
     const platform::window_handle wplatform_handle = wman.get_window_platform_handle(wid).claim();
     rman.register_window(wplatform_handle).claim();
 
-    using timepoint = std::chrono::steady_clock::time_point;;
+    using timepoint = std::chrono::steady_clock::time_point;
     timepoint last = std::chrono::steady_clock::now();
     timepoint now = last;
     float time = 0.0f;
     while (true)
     {   
         now = std::chrono::steady_clock::now();
-        const float ms_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count();
+        const float ms_since_last = (float)std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count();
         const float delta_seconds = ms_since_last * 0.01f;
         last = now;
         time += delta_seconds;
         
-        commandman::get().command_script("D:/Git/strikers/commands.md");
+        inputman::get().tick();
+        commandman::get().tick();
         wman.poll_windows();
-        
         physics.tick();
 
-        inputman::get().tick();
         gman.tick(time, delta_seconds);
 
         renderscene scene;
         gman.build_renderscene(cman, scene);
         rman.render(scene, cman);
 
-        log_with_cooldown(delta_seconds, 1.0f, "[fps]{}", 1.0f / delta_seconds);
+        if (cm_log_fps.get_value() > 0)
+        {
+            const float fps = 1.0f / delta_seconds;
+            if (fps > 30) logman::color(logcolor::green, 1);
+            log_with_cooldown(delta_seconds, 1.0f, "[fps]{}", 1.0f / delta_seconds);
+        }
+
+        if (cm_log_clear.get_value() > 0)
+        {
+            system("cls");
+        }
     }
 }

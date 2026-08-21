@@ -21,10 +21,9 @@ static const char* k_button_names[]
 
 class inputman
 {
-public:
 	struct button_state;
 	struct input_state;
-
+public:
 	enum class button
 	{
 		lmouse,
@@ -50,9 +49,6 @@ public:
 
 	uint32 get_button_state_index(button btn) const;
 	uint32 get_button_state_index(char ascii) const;
-	const button_state& get_button_state(button btn) const;
-	const button_state& get_button_state(char ascii) const;
-	const input_state& get_input_state() const;
 
 	bool is_button_down(button btn, uint32* num_frames_since_change = nullptr);
 	bool is_button_down(char ascii, uint32* num_frames_since_change = nullptr);
@@ -63,9 +59,6 @@ public:
 	void reset();
 
 private:
-	button_state& get_button_state(button btn);
-	button_state& get_button_state(char ascii);
-
 	struct button_state final
 	{
 		uint32 m_is_down;
@@ -87,5 +80,12 @@ private:
 		button_state m_buttons[k_num_button_states];
 	};
 	input_state m_input_state;
+
+	button_state& get_button_state(button btn);
+	button_state& get_button_state(char ascii);
+
+	const button_state& get_button_state(button btn) const;
+	const button_state& get_button_state(char ascii) const;
+	const input_state& get_input_state() const;
 };
 }

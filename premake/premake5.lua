@@ -29,7 +29,7 @@ project "strikers"
     }
     files(sourceFiles)
     files(headerFiles)
-    files(shaderFiles)
+    -- files(shaderFiles)
     vpaths {
         ["source/*"] = sourceFiles,
         ["include/*"] = headerFiles,

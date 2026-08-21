@@ -48,6 +48,7 @@ struct gpu_line_instance
 	float3 m_point_a;
 	float3 m_point_b;
 };
+
 class contentman;
 using dxdevice = ID3D12Device;
 using dxswapchain = IDXGISwapChain4;

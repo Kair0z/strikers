@@ -11,6 +11,11 @@ command cm_camera_sensy("camera.sensy", "0.1");
 command cm_camera_devcontrol("camera.devcontrol", "0");
 command cm_camera_maxspeed("camera.maxspeed", "10");
 command cm_camera_acceleration("camera.acceleration", "10");
+
+command cm_game_physics_enable("game.physics.enable", "1");
+command cm_game_gravity_enable("game.gravity.enable", "1");
+command cm_game_air_density("game.airdensity", "1.225");
+command cm_draw_debug("draw.debug", "1");
 command cm_draw_debug_physics("draw.debug.physics", "1");
 
 static const float3 k_pitch_center = {};
@@ -38,66 +43,11 @@ static const float4 k_team_colors[]
 	float4(0,0,1,1)
 };
 
-gameman::actor& gameman::create_actor(const actor_create_args& create_args)
-{
-	physman& physics = physman::get();
-	const role rl = create_args.m_role;
-	actor new_actor{};
-	new_actor.m_role = rl;
-	new_actor.m_transform = create_args.m_transform;
-	new_actor.m_transform_original = new_actor.m_transform;
-	new_actor.m_transform_physics = new_actor.m_transform;
-	new_actor.m_mesh = create_args.m_mesh;
-	
-	// create physics body
-	{
-		physman::create_body_args body_args;
-		switch (rl)
-		{
-		case role::statik:
-			body_args.m_flags = physman::body_flags::none;
-			break;
-		default:
-			body_args.m_flags = physman::body_flags::dynamic;
-			break;
-		}
-		body_args.m_shape = physman::body_shape::sphere;
-		body_args.m_transform = new_actor.m_transform;
-		new_actor.m_body = physics.create_body(body_args);
-	}
-
-	m_actors.push_back(new_actor);
-	const uint32 id = (uint32)m_actors.size() - 1u;
-	m_role_lookup[rl].push_back(id);
-	return m_actors.back();
-}
-
-bool gameman::find_role_actor(role role, uint32 index, actor*& out_actor_ptr)
-{
-	auto found = m_role_lookup.find(role);
-	if (found != m_role_lookup.cend())
-	{
-		const vector<uint32>& role_actor_indices = found->second;
-		if (index < role_actor_indices.size())
-		{
-			out_actor_ptr = &m_actors[role_actor_indices[index]];
-			return true;
-		}
-		else return false;
-	}
-	else return false;
-}
-
-void gameman::assemble_scene(const contentman& cman, const stringview& filepath)
+void gameman::assemble_fbx_scene(const contentman& cman, const stringview& filepath)
 {
 	const scene_id scid = contentman::make_scene_id(filepath);
-	auto found_result = cman.find_typed_asset<asset_type::scene>(scid);
-	if (found_result.is_fail())
-	{
-		return;
-	}
+	const scene_asset& scene = *cman.find_typed_asset<asset_type::scene>(scid).claim();
 
-	const scene_asset& scene = *found_result.claim();
 	if (!scene.m_cameras.empty())
 	{
 		m_camera.m_asset_id = scene.m_cameras[0];
@@ -108,62 +58,27 @@ void gameman::assemble_scene(const contentman& cman, const stringview& filepath)
 			m_camera.m_transform.add_position_local({ 0,0,15 });
 			m_camera.m_transform_original = m_camera.m_transform;
 		}
-		
-#if 0
-		const float3 position = m_camera_transform.get_position();
-		const float3 forward = m_camera_transform.get_forward();
-		const float3 up = m_camera_transform.get_up();
-		const float3 right = m_camera_transform.get_right();
-
-		logman::log("[camera]");
-		logman::log("> pos: " format_f3, position.x, position.y, position.z);
-		logman::log("> fwd: " format_f3, forward.x, forward.y, forward.z);
-		logman::log("> up: " format_f3, up.x, up.y, up.z);
-		logman::log("> right: " format_f3, right.x, right.y, right.z);
-#endif
 	}
 
 	scene.m_graph.traverse([cman, this, &scene](uint32 node_id)
 	{
+		// for each mesh entry in our scene asset: add a new actor
 		const scene_asset::node& node = scene.m_graph.get(node_id).data();
-		for (mesh_id mesh : node.m_meshes)
+		for (mesh_id meshid : node.m_meshes)
 		{
-			actor_create_args new_actor{};
-			if (strstr(node.m_name.c_str(), "kritter"))
-				new_actor.m_role = role::keeper;
-			if (strstr(node.m_name.c_str(), "goal"))
-				new_actor.m_role = role::goal;
-			if (strstr(node.m_name.c_str(), "toad"))
-				new_actor.m_role = role::pawn;
-			
-			new_actor.m_mesh = mesh;
-			new_actor.m_transform.m_matrix = node.m_scene_transform;
-			create_actor(new_actor);
-			
-#if 0
-			const float3 position = pwn.m_transform.get_position();
-			const float3 forward = pwn.m_transform.get_forward();
-			const float3 up = pwn.m_transform.get_up();
-			const string mesh_name = cman.find_typed_asset<asset_type::mesh>(mesh).claim()->m_name;
-
-			logman::log("[mesh {}]", mesh_name);
-			logman::log("> pos: " format_f3, position.x, position.y, position.z);
-			logman::log("> fwd: " format_f3, forward.x, forward.y, forward.z);
-			logman::log("> up: " format_f3, up.x, up.y, up.z);
-
-			if (strstr(mesh_name.c_str(), "kritter") != nullptr)
-			{
-				static int a = 0;
-				a++;
-			}
-#endif
+			actor_id new_actor = create_actor();
+			auto& render = add_component<component::type::render>(new_actor);
+			render.m_mesh = meshid;
+			auto& transform = add_component<component::type::transform>(new_actor);
+			add_component<component::type::physics>(new_actor);
+			transform.m_transform.m_matrix = node.m_scene_transform;
 		}
 	});
 }
 
 void gameman::start(const contentman& cman)
 {
-	assemble_scene(cman, string(k_content_folder) + "scene.fbx");
+	assemble_fbx_scene(cman, string(k_content_folder) + "scene.fbx");
 }
 
 void gameman::tick(float seconds, float delta_seconds)
@@ -171,7 +86,44 @@ void gameman::tick(float seconds, float delta_seconds)
 	inputman& input = inputman::get();
 	commandman& commands = commandman::get();
 	physman& physics = physman::get();
-	
+
+	// resolve physics
+	if (cm_game_physics_enable.get_value() > 0)
+	for (auto& cmp_physics : components<component::type::physics>())
+	{
+		comp_transform* transform = get_component<component::type::transform>(cmp_physics.m_owner);
+		if (!transform)
+		{
+			continue;
+		}
+
+		// resolve velocity
+		auto& velocity = cmp_physics.m_velocity;
+		float gravity = cmp_physics.m_gravity;
+		if (cm_game_gravity_enable.get_value() <= 0)
+			gravity = 0;
+
+		// apply gravity acceleration
+		const float3 acceleration = float3(0, gravity, 0);
+		velocity += acceleration * delta_seconds;
+
+		// apply air drag
+		const float velocity_sqr = glm::dot(velocity, velocity);
+		if (velocity_sqr < 0.00001f) velocity = {};
+		else
+		{
+			const float air_density = cm_game_air_density.get_value();
+			const float area = 1.0f; // dont care
+			const float mass = 1.0f; // dont care
+			const float drag_deceleration = (air_density * velocity_sqr * area) / (2.0f * mass);
+			velocity -= glm::normalize(velocity) * drag_deceleration * delta_seconds;
+		}
+
+		// resolve deltapos
+		const float3 delta_position = velocity * delta_seconds;
+		transform->m_transform.add_position_world(delta_position);
+	}
+
 	// tick dev-camera controls
 	if (cm_camera_devcontrol.get_value() > 0)
 	{
@@ -216,28 +168,20 @@ void gameman::tick(float seconds, float delta_seconds)
 			m_camera.m_transform = m_camera.m_transform_original;
 		}
 	}
-
-	// gather physics
-	const bool space_down = input.is_button_down(inputman::button::space);
-	for (auto& actor : m_actors)
-	{
-		physics.query_body_transform(actor.m_body, actor.m_transform);
-		if (space_down) physics.body_apply_force(actor.m_body,
-			physman::force_args::force(100.0f * float3{ 0,1,0 }));
-	}
 }
 
 void gameman::build_renderscene(const contentman& cman, renderscene& scene) const
 {
 	physman& physics = physman::get();
+	renderscene::line_builder lines{ scene };
 
+	// hardcoded camera
 	scene.m_camera.m_near = 0.001f;
 	scene.m_camera.m_far = 1000.0f;
 	scene.m_camera.m_fov = 140;
 	scene.m_camera.m_transform = m_camera.m_transform;
-	scene.m_light.m_color = float4(1, 1, 1, 1);
-	scene.m_light.m_direction = float4(-1, 1, -1, -1);
 	
+	// use camera ASSET to guide camera settings
 	camera_asset const* camera_asset = cman.find_camera(m_camera.m_asset_id);
 	if (camera_asset && false)
 	{
@@ -246,39 +190,31 @@ void gameman::build_renderscene(const contentman& cman, renderscene& scene) cons
 		scene.m_camera.m_fov = camera_asset->m_fov_horizontal;
 	}
 
-	// gather ui instances
-	for (uint32 i = 0; i < 0; ++i)
+	// hardcoded light
+	scene.m_light.m_color = float4(1, 1, 1, 1);
+	scene.m_light.m_direction = float4(-1, 1, -1, -1);
+
+	for (const auto& cmp_render : components<component::type::render>())
+	{
+		comp_transform const* transform = get_component<component::type::transform>(cmp_render.m_owner);
+		if (!transform)
+		{
+			continue;
+		}
+
+		// draw the pawn mesh instance
+		const mesh_id mesh = cmp_render.m_mesh;
+		auto& mesh_instance = scene.add_mesh_instance(mesh, shader::shaded);
+		mesh_instance.m_transform = transform->m_transform;
+		mesh_instance.apply_material(cman, cman.get_mesh_material_id(mesh));
+	}
+
+	for (const auto& cmp_ui_render : components<component::type::renderui>())
 	{
 		auto& instance = scene.add_ui_instance();
 		instance.m_image = k_img_checkerboard;
 		instance.m_box;
 	}
-	
-	// draw physics debug
-	if (cm_draw_debug_physics.get_value() > 0)
-	{
-		physman::db_draw args{};
-		args.m_flags |= physman::db_draw::draw_bounds;
-		args.m_flags |= physman::db_draw::draw_all;
-		physics.debug_draw(args, scene);
-	}
-
-	// gather mesh instances
-	for (const auto& actor : m_actors)
-	{
-		// draw the pawn mesh instance
-		const mesh_id mesh = actor.m_mesh;
-		auto& mesh_instance = scene.add_mesh_instance(mesh, shader::shaded);
-		mesh_instance.m_transform = actor.m_transform;
-		mesh_instance.m_color = k_team_colors[actor.m_team_id % _countof(k_team_colors)];
-		mesh_instance.apply_material(cman, cman.get_mesh_material_id(mesh));
-	}
-
-	// draw debug
-	renderscene::line_builder lines{ scene };
-	transform trans = transform::identity();
-	trans.set_scale(1000);
-	lines.add_transform(trans);
 }
 }
 
