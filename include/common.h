@@ -115,7 +115,64 @@ using float3 = glm::fvec3;
 using float4 = glm::fvec4;
 using float4x4 = glm::mat4;
 using rotation = glm::quat;
-using sphere = float4; //
+using color = float4;
+
+namespace colors
+{
+	static constexpr color red() { return float4(1, 0, 0, 1); }
+	static constexpr color green() { return float4(0, 1, 0, 1); }
+	static constexpr color blue() { return float4(0, 0, 1, 1); }
+	static constexpr color white() { return float4(1, 1, 1, 1); }
+}
+
+struct sphere
+{
+	float4 m_position_radius;
+	
+	sphere() = default;
+	sphere(float3 position, float radius) : m_position_radius{ position, radius } { }
+	sphere(const float4 posrad) : m_position_radius{ posrad } {}
+
+	static sphere unit()
+	{
+		return sphere(float3(0,0,0), 1.0f);
+	}
+
+	float radius() const { return m_position_radius.w; }
+	float3 position() const { return float3(m_position_radius.x, m_position_radius.y, m_position_radius.z); }
+};
+struct box
+{
+	float3 m_position;
+	float3 m_extents;
+
+	box() = default;
+
+	static box unit()
+	{
+		static box unitbox{};
+		unitbox.m_extents = float3(1,1,1) * 0.5f;
+		unitbox.m_position = { 0,0,0 };
+	}
+
+	void grow_to_fit(const float3 point)
+	{
+		const float3 rel_point = point - m_position;
+		m_extents.x = glm::max(m_extents.x, rel_point.x);
+		m_extents.y = glm::max(m_extents.y, rel_point.y);
+		m_extents.z = glm::max(m_extents.z, rel_point.z);
+	}
+
+	float3 abs_min() const
+	{
+		return m_position - m_extents;
+	}
+	float3 abs_max() const
+	{
+		return m_position + m_extents;
+	}
+};
+
 static mat4x4 calculate_view_mat(const mat4x4& camera_transform)
 {
 	return glm::inverse(camera_transform);

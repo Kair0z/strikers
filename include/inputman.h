@@ -23,6 +23,7 @@ class inputman
 {
 	struct button_state;
 	struct input_state;
+
 public:
 	enum class button
 	{
@@ -52,6 +53,8 @@ public:
 
 	bool is_button_down(button btn, uint32* num_frames_since_change = nullptr);
 	bool is_button_down(char ascii, uint32* num_frames_since_change = nullptr);
+	bool is_button_down(const char* btn_str, uint32* num_frames_since_change = nullptr);
+
 	float2 get_mouse_delta() const;
 	float2 get_mouse_position() const;
 
@@ -87,5 +90,18 @@ private:
 	const button_state& get_button_state(button btn) const;
 	const button_state& get_button_state(char ascii) const;
 	const input_state& get_input_state() const;
+
+	static bool parse_button_from_name(const char* name, button& out_button)
+	{
+		for (uint32 i = 0u; i < (uint32)button::num; ++i)
+		{
+			if (strcmp(k_button_names[i], name) == 0)
+			{
+				out_button = (button)i;
+				return true;
+			}
+		}
+		return false;
+	}
 };
 }

@@ -247,20 +247,20 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
 
             mesh_asset asset_data{};
             asset_data.m_name = string(mesh->mName.C_Str());
-            if (strstr(asset_data.m_name.c_str(), "toad"))
-            {
-                static int a = 0;
-                a++;
-            }
             asset_data.m_scene_id = sc_id;
             const uint32 num_vertices = mesh->mNumVertices;
             const uint32 num_bones = mesh->mNumBones;
             asset_data.m_vertices.resize(num_vertices);
+
+            float3 average_position = {};
+
             for (uint32 v = 0; v < num_vertices; ++v)
             {
                 memcpy(&asset_data.m_vertices[v].m_position, &mesh->mVertices[v], sizeof(float3));
                 memcpy(&asset_data.m_vertices[v].m_normal, &mesh->mNormals[v], sizeof(float3));
                 memcpy(&asset_data.m_vertices[v].m_uv, &mesh->mTextureCoords[0][v], sizeof(float2));
+
+                average_position += asset_data.m_vertices[v].m_position;
             }
             for (uint32 f = 0; f < mesh->mNumFaces; ++f)
             {
@@ -285,6 +285,25 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
                     vertex.m_num_active_bones++;
                 }
             }
+
+            // calculate avg distances
+            average_position /= num_vertices;
+            asset_data.m_bounds_box.m_position = average_position;
+            asset_data.m_bounds_sphere = sphere(average_position, 0.0f);
+            float furthest_distance_sqr = 0;
+            for (uint32 v = 0; v < num_vertices; ++v)
+            {
+                const float3 point = asset_data.m_vertices[v].m_position;
+                asset_data.m_bounds_box.grow_to_fit(point);
+
+                const float3 delta = point - average_position;
+                const float sqr_distance = glm::dot(delta, delta);
+                if (sqr_distance > furthest_distance_sqr)
+                {
+                    furthest_distance_sqr = sqr_distance;
+                }
+            }
+            asset_data.m_bounds_sphere.m_position_radius.w = glm::sqrt(furthest_distance_sqr);
 
             asset_data.m_mat_id = material_ids[mesh->mMaterialIndex];
             allocate_asset<asset_type::mesh>(mesh_id, asset_data, root_id);

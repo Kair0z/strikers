@@ -8,7 +8,15 @@
 namespace strikers {
 
 command cm_camera_sensy("camera.sensy", "0.1");
-command cm_camera_devcontrol("camera.devcontrol", "0");
+command cm_camera_dev_control("camera.dev.control", "0");
+command cm_camera_dev_reset("camera.dev.reset", "r");
+command cm_camera_dev_left("camera.dev.left", "a");
+command cm_camera_dev_right("camera.dev.right", "d");
+command cm_camera_dev_forward("camera.dev.forward", "w");
+command cm_camera_dev_back("camera.dev.back", "s");
+command cm_camera_dev_up("camera.dev.up", "space");
+command cm_camera_dev_down("camera.dev.down", "shift");
+
 command cm_camera_maxspeed("camera.maxspeed", "10");
 command cm_camera_acceleration("camera.acceleration", "10");
 
@@ -16,7 +24,6 @@ command cm_game_physics_enable("game.physics.enable", "1");
 command cm_game_gravity_enable("game.gravity.enable", "1");
 command cm_game_air_density("game.airdensity", "1.225");
 command cm_draw_debug("draw.debug", "1");
-command cm_draw_debug_physics("draw.debug.physics", "1");
 
 static const float3 k_pitch_center = {};
 static const uint32 k_players_per_team = 4;
@@ -67,10 +74,26 @@ void gameman::assemble_fbx_scene(const contentman& cman, const stringview& filep
 		for (mesh_id meshid : node.m_meshes)
 		{
 			actor_id new_actor = create_actor();
-			auto& render = add_component<component::type::render>(new_actor);
-			render.m_mesh = meshid;
 			auto& transform = add_component<component::type::transform>(new_actor);
-			add_component<component::type::physics>(new_actor);
+			auto& physics = add_component<component::type::physics>(new_actor);
+
+			// get the mesh & material, if material is named 'collider' we add a bounds component to the actor
+			bool is_material_collider = false;
+			mesh_asset const* mesh = nullptr; material_asset const* material = nullptr;
+			if (cman.find_mesh_and_material(meshid, mesh, material))
+			{
+				if (strstr(material->m_name.c_str(), "collider"))
+				{
+					auto& bounds = add_component<component::type::bounds>(new_actor);
+					bounds.m_box = mesh->m_bounds_box;
+					bounds.m_sphere = mesh->m_bounds_sphere;
+				}
+				else
+				{
+					auto& render = add_component<component::type::render>(new_actor);
+					render.m_mesh = meshid;
+				}
+			}
 			transform.m_transform.m_matrix = node.m_scene_transform;
 		}
 	});
@@ -125,30 +148,29 @@ void gameman::tick(float seconds, float delta_seconds)
 	}
 
 	// tick dev-camera controls
-	if (cm_camera_devcontrol.get_value() > 0)
+	if (cm_camera_dev_control.get_value() > 0)
 	{
 		// move the camera
-		const float4 awsd = {
-			input.is_button_down('a'),
-			input.is_button_down('w'),
-			input.is_button_down('s'),
-			input.is_button_down('d')
-		};
-		const float2 updown {
-			input.is_button_down(inputman::button::space),
-			input.is_button_down(inputman::button::shift)
-		};
+		const float left = input.is_button_down(cm_camera_dev_left.value().c_str());
+		const float fwd = input.is_button_down(cm_camera_dev_forward.value().c_str());
+		const float back = input.is_button_down(cm_camera_dev_back.value().c_str());
+		const float right = input.is_button_down(cm_camera_dev_right.value().c_str());
+		const float up = input.is_button_down(cm_camera_dev_up.value().c_str());
+		const float down = input.is_button_down(cm_camera_dev_down.value().c_str());
+
 		float3 delta_horizontal =
-			(m_camera.m_transform.get_right() * (awsd.w - awsd.x)) +
-			(m_camera.m_transform.get_forward() * (awsd.y - awsd.z));
-		float3 delta_position = delta_horizontal + (float3(0, 1, 0) * (updown.x - updown.y));
+			(m_camera.m_transform.get_right() * (right - left)) +
+			(m_camera.m_transform.get_forward() * (fwd - back));
+		float3 delta_vertical =
+			(float3(0, 1, 0) * (up - down));
+
+		float3 delta_position = delta_horizontal + delta_vertical;
 		m_camera.m_velocity += delta_position * delta_seconds * cm_camera_acceleration.get_value();
 		m_camera.m_velocity = clamp_length(m_camera.m_velocity, cm_camera_maxspeed.get_value());
-
 		m_camera.m_transform.add_position_world(m_camera.m_velocity * delta_seconds);
 
 		// drag camera velocity
-		if (glm::dot(awsd, awsd) < 0.0001f && glm::dot(updown, updown) < 0.0001f)
+		if (glm::dot(delta_position, delta_position) > 0.0001f)
 		{
 			m_camera.m_velocity *= 0.001f;
 		}
@@ -162,7 +184,7 @@ void gameman::tick(float seconds, float delta_seconds)
 		}
 
 		// reset camera
-		if (input.is_button_down('r'))
+		if (input.is_button_down(cm_camera_dev_reset.value().c_str()))
 		{
 			m_camera.m_velocity = {};
 			m_camera.m_transform = m_camera.m_transform_original;
@@ -194,6 +216,7 @@ void gameman::build_renderscene(const contentman& cman, renderscene& scene) cons
 	scene.m_light.m_color = float4(1, 1, 1, 1);
 	scene.m_light.m_direction = float4(-1, 1, -1, -1);
 
+	// draw meshes
 	for (const auto& cmp_render : components<component::type::render>())
 	{
 		comp_transform const* transform = get_component<component::type::transform>(cmp_render.m_owner);
@@ -203,12 +226,33 @@ void gameman::build_renderscene(const contentman& cman, renderscene& scene) cons
 		}
 
 		// draw the pawn mesh instance
-		const mesh_id mesh = cmp_render.m_mesh;
-		auto& mesh_instance = scene.add_mesh_instance(mesh, shader::shaded);
+		const mesh_id meshid = cmp_render.m_mesh;
+		mesh_asset const* mesh = cman.find_mesh(meshid);
+		if (!mesh)
+		{
+			continue;
+		}
+
+		auto& mesh_instance = scene.add_mesh_instance(meshid, shader::shaded);
 		mesh_instance.m_transform = transform->m_transform;
-		mesh_instance.apply_material(cman, cman.get_mesh_material_id(mesh));
+		mesh_instance.apply_material(cman, cman.get_mesh_material_id(meshid));
 	}
 
+	// draw bounds
+	if (cm_draw_debug.get_value() > 0)
+	for (const auto& cmp_bounds : components<component::type::bounds>())
+	{
+		comp_transform const* transform = get_component<component::type::transform>(cmp_bounds.m_owner);
+		if (!transform)
+		{
+			continue;
+		}
+
+		// lines.add_sphere(transform->m_transform, cmp_bounds.m_sphere, colors::green());
+		lines.add_box(transform->m_transform, cmp_bounds.m_box, colors::green());
+	}
+
+	// draw ui
 	for (const auto& cmp_ui_render : components<component::type::renderui>())
 	{
 		auto& instance = scene.add_ui_instance();

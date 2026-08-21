@@ -1,4 +1,13 @@
-camera.devcontrol   1;
+# camera
+camera.dev.control  1;
+camera.dev.reset    r;
+camera.dev.left     a;
+camera.dev.right    d;
+camera.dev.forward  w;
+camera.dev.back     s;
+camera.dev.up       space;
+camera.dev.down     shift;
+
 camera.sensy        0.1;
 camera.maxspeed     500;
 camera.acceleration 100000;
@@ -10,8 +19,8 @@ log.commands 0;
 
 # game
 game.debug.reset;
-game.physics.enable 1;
-game.gravity.enable 1;
+game.physics.enable 0;
+game.gravity.enable 0;
 game.airdensity 1.225;
 
 # physics

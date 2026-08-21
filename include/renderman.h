@@ -151,8 +151,8 @@ public:
 			line.m_color = color;
 			return *this;
 		}
-		const line_builder& add_sphere(const transform& transform, const float radius, const float4& color) const;
-		const line_builder& add_box(const transform& transform, const float3& min, const float3& max, const float4& color) const;
+		const line_builder& add_sphere(const transform& transform, const sphere& sphere, const float4& color) const;
+		const line_builder& add_box(const transform& transform, const box& box, const float4& color) const;
 		const line_builder& add_transform(const transform& transform) const;
 	};
 

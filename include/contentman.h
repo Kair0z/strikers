@@ -103,6 +103,8 @@ struct mesh_asset final
 	scene_id m_scene_id{};
 	mat_id m_mat_id{};
 	string m_name;
+	sphere m_bounds_sphere;
+	box m_bounds_box;
 
 	struct vertex
 	{
@@ -397,6 +399,17 @@ public:
 	}
 	material_asset const* find_material(const mat_id id) const {
 		return find_typed_asset<asset_type::material>(id).claim();
+	}
+	bool find_mesh_and_material(const mesh_id id, mesh_asset const*& out_mesh, material_asset const*& out_material) const {
+		auto mesh = find_typed_asset<asset_type::mesh>(id);
+		if (mesh.is_fail()) return false;
+
+		auto material = find_typed_asset<asset_type::material>(mesh.claim()->m_mat_id);
+		if (material.is_fail()) return false;
+
+		out_mesh = mesh.claim();
+		out_material = material.claim();
+		return true;
 	}
 	mat_id get_mesh_material_id(const mesh_id id) const
 	{

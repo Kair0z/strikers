@@ -215,6 +215,7 @@ void physman::debug_draw(const db_draw& args, renderscene& scene)
 	
 	debug_draw.DrawShapeFcn = [](void* shape, b3WorldTransform b3_trans, b3HexColor hex_color, void* context)
 	{
+#if 0
 		b3DebugShape* dbg_shape = (b3DebugShape*)shape;
 		renderscene& scene = (*(renderscene*)context);
 		renderscene::line_builder lines{ scene };
@@ -233,6 +234,7 @@ void physman::debug_draw(const db_draw& args, renderscene& scene)
 			break;
 		}
 		shape;
+#endif
 	};
 	debug_draw.DrawSegmentFcn = [](b3Pos p1, b3Pos p2, b3HexColor color, void* context)
 	{

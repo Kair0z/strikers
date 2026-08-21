@@ -14,6 +14,7 @@ private:
 	{
 		component_array<component::type::transform> m_transforms;
 		component_array<component::type::physics> m_physics;
+		component_array<component::type::bounds> m_bounds;
 		component_array<component::type::render> m_renders;
 		component_array<component::type::renderui> m_renderuis;
 	} m_components;
@@ -23,6 +24,7 @@ private:
 	{
 		if constexpr (_t == component::type::transform) return m_components.m_transforms;
 		else if constexpr (_t == component::type::physics) return m_components.m_physics;
+		else if constexpr (_t == component::type::bounds) return m_components.m_bounds;
 		else if constexpr (_t == component::type::render) return m_components.m_renders;
 		else if constexpr (_t == component::type::renderui) return m_components.m_renderuis;
 	}
@@ -31,6 +33,7 @@ private:
 	{
 		if constexpr (_t == component::type::transform) return m_components.m_transforms;
 		else if constexpr (_t == component::type::physics) return m_components.m_physics;
+		else if constexpr (_t == component::type::bounds) return m_components.m_bounds;
 		else if constexpr (_t == component::type::render) return m_components.m_renders;
 		else if constexpr (_t == component::type::renderui) return m_components.m_renderuis;
 	}

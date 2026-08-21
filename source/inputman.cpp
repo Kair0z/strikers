@@ -59,6 +59,20 @@ bool inputman::is_button_down(char ascii, uint32* num_frames_since_change)
 	return state.m_is_down;
 }
 
+bool inputman::is_button_down(const char* btn_str, uint32* num_frames_since_change)
+{
+	const auto length = strlen(btn_str);
+	if (length == 0) return false;
+	if (length == 1) return is_button_down(btn_str[0], num_frames_since_change);
+
+	button btn;
+	if (parse_button_from_name(btn_str, btn))
+	{
+		return is_button_down(btn, num_frames_since_change);
+	}
+	else return false;
+}
+
 float2 inputman::get_mouse_delta() const
 {
 	return get_mouse_position() - m_input_state.m_mouse.m_previous_position;

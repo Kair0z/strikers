@@ -13,6 +13,7 @@ struct component
 	{
 		transform,
 		physics,
+		bounds,
 		render,
 		renderui,
 		num
@@ -55,6 +56,12 @@ struct comp_physics final : public detail::component_t<component::type::physics>
 	float m_drag_air = 1; // per-body 'drag coefficient'
 };
 
+struct comp_bounds final : public detail::component_t<component::type::bounds>
+{
+	box m_box;
+	sphere m_sphere;
+};
+
 struct comp_render final : public detail::component_t<component::type::render>
 {
 	mesh_id m_mesh;
@@ -70,6 +77,7 @@ template <component::type _t>
 using component_t = std::tuple_element_t<static_cast<uint64>(_t), std::tuple<
 	comp_transform,
 	comp_physics,
+	comp_bounds,
 	comp_render,
 	comp_ui>>;
 

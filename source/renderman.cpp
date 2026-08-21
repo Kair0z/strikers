@@ -1603,7 +1603,7 @@ void renderscene::mesh_instance::apply_material(const contentman& cman, const ma
 	}
 }
 
-const renderscene::line_builder& renderscene::line_builder::add_sphere(const transform& transform, const float radius, const float4& color) const
+const renderscene::line_builder& renderscene::line_builder::add_sphere(const transform& transform, const sphere& sphere, const float4& color) const
 {
 	constexpr float PI = 3.14159265359f;
 
@@ -1612,6 +1612,9 @@ const renderscene::line_builder& renderscene::line_builder::add_sphere(const tra
 	const uint32 segments = 12;
 	const uint32 num_lines = (2 * rings - 1) * segments;
 	m_owner.m_line_instances.reserve(m_owner.m_line_instances.size() + num_lines);
+
+	const float radius = sphere.radius();
+	const float3 position = sphere.position();
 
 	float4 p0, p1;
 	for (uint32 i = 1; i < rings; ++i)
@@ -1623,8 +1626,11 @@ const renderscene::line_builder& renderscene::line_builder::add_sphere(const tra
 		{
 			float a0 = 2.0f * PI * j / segments;
 			float a1 = 2.0f * PI * (j + 1) / segments;
-			p0 = transform.m_matrix * float4{ ringRadius * std::cos(a0), y, ringRadius * std::sin(a0), 1.0f };
-			p1 = transform.m_matrix * float4{ ringRadius * std::cos(a1), y, ringRadius * std::sin(a1), 1.0f };
+
+			const float3 p0n = position + float3(ringRadius * std::cos(a0), y, ringRadius * std::sin(a0));
+			const float3 p1n = position + float3(ringRadius * std::cos(a1), y, ringRadius* std::sin(a1));
+			p0 = transform.m_matrix * float4{ p0n, 1.0f };
+			p1 = transform.m_matrix * float4{ p1n, 1.0f };
 			add_line(p0, p1, color);
 		}
 	}
@@ -1634,25 +1640,28 @@ const renderscene::line_builder& renderscene::line_builder::add_sphere(const tra
 		for (uint32 i = 0; i < rings; ++i) {
 			float phi0 = PI * i / rings;
 			float phi1 = PI * (i + 1) / rings;
-			p0 = transform.m_matrix * float4{ radius * std::sin(phi0) * std::cos(theta0), radius * std::cos(phi0), radius * std::sin(phi0) * std::sin(theta0), 1.0f};
-			p1 = transform.m_matrix * float4{ radius * std::sin(phi1) * std::cos(theta0), radius * std::cos(phi1), radius * std::sin(phi1) * std::sin(theta0), 1.0f};
+
+			const float3 p0n = position + float3(radius * std::sin(phi0) * std::cos(theta0), radius * std::cos(phi0), radius * std::sin(phi0) * std::sin(theta0));
+			const float3 p1n = position + float3(radius * std::sin(phi1) * std::cos(theta0), radius * std::cos(phi1), radius * std::sin(phi1) * std::sin(theta0));
+			p0 = transform.m_matrix * float4{ p0n, 1.0f};
+			p1 = transform.m_matrix * float4{ p1n, 1.0f};
 			add_line(p0, p1, color);
 		}
 	}
 	return *this;
 }
-const renderscene::line_builder& renderscene::line_builder::add_box(const transform& transform, const float3& min, const float3& max, const float4& color) const
+const renderscene::line_builder& renderscene::line_builder::add_box(const transform& transform, const box& box, const float4& color) const
 {
 	const float3 corners[8] =
 	{
-		{ min.x, min.y, min.z },
-		{ max.x, min.y, min.z },
-		{ max.x, max.y, min.z },
-		{ min.x, max.y, min.z },
-		{ min.x, min.y, max.z },
-		{ max.x, min.y, max.z },
-		{ max.x, max.y, max.z },
-		{ min.x, max.y, max.z },
+		{ box.abs_min().x, box.abs_min().y, box.abs_min().z },
+		{ box.abs_max().x, box.abs_min().y, box.abs_min().z },
+		{ box.abs_max().x, box.abs_max().y, box.abs_min().z },
+		{ box.abs_min().x, box.abs_max().y, box.abs_min().z },
+		{ box.abs_min().x, box.abs_min().y, box.abs_max().z },
+		{ box.abs_max().x, box.abs_min().y, box.abs_max().z },
+		{ box.abs_max().x, box.abs_max().y, box.abs_max().z },
+		{ box.abs_min().x, box.abs_max().y, box.abs_max().z },
 	};
 	constexpr uint32 edges[][2] =
 	{
