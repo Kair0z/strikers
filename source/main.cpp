@@ -11,8 +11,8 @@ using namespace strikers;
 extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 619; }
 extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\"; }
 
-command cm_log_fps("log.fps", "1");
-command cm_log_clear("log.clear", "0", command::flags::oneshot);
+command cm_log_fps("log_fps", "1");
+command cm_log_clear("log_clear", "0", command::flags::oneshot);
 
 int main()
 {
@@ -49,8 +49,7 @@ int main()
     while (true)
     {   
         now = std::chrono::steady_clock::now();
-        const float ms_since_last = (float)std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count();
-        const float delta_seconds = ms_since_last * 0.01f;
+        const float delta_seconds = std::chrono::duration<float>(now - last).count();
         last = now;
         time += delta_seconds;
         
@@ -69,7 +68,7 @@ int main()
         {
             const float fps = 1.0f / delta_seconds;
             if (fps > 30) logman::color(logcolor::green, 1);
-            log_with_cooldown(delta_seconds, 1.0f, "[fps]{}", 1.0f / delta_seconds);
+            logman::log("[fps]{}", 1.0f / delta_seconds);
         }
 
         if (cm_log_clear.get_value() > 0)

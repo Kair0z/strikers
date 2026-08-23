@@ -84,6 +84,10 @@ public:
 		{
 			return m_idx;
 		}
+		uint32 get_depth() const
+		{
+			return m_depth;
+		}
 		const _t& data() const
 		{
 			return m_data;
@@ -101,6 +105,7 @@ public:
 		node_idx m_next_sibling = k_invalid;
 		node_idx m_prev_sibling = k_invalid;
 		node_idx m_idx;
+		uint32 m_depth;
 		bool m_visited = false;
 
 		flatgraph* m_graph;
@@ -134,6 +139,14 @@ public:
 		new_node.m_is_valid = true;
 		new_node.m_data = data;
 
+		// count depth
+		node_idx prnt = parent(new_idx);
+		while (prnt != k_root)
+		{
+			prnt = parent(prnt);
+			new_node.m_depth++;
+		}
+
 		// prev <- new -> next
 		const node_idx parent_first_child_index = first_child(parent_index);
 		new_node.m_prev_sibling = is_first_child ? new_idx : last_child(parent_index);
@@ -148,6 +161,7 @@ public:
 		return new_idx;
 	}
 
+	// void func(node_idx current, node_idx parent);
 	template <typename _fn>
 	void traverse(_fn&& func, node_idx start_node = k_root, traverse_mode mode = traverse_mode::width) const
 	{
@@ -156,41 +170,54 @@ public:
 
 		// first visit start node
 		visited_map[start_node] = true;
-		func(start_node);
-
+		if (start_node != k_root)
+		{
+			func(start_node, k_invalid);
+		}
+		
 		if (mode == traverse_mode::width)
 		{
 			std::function<void(node_idx)> traverse_layer;
 			traverse_layer = [this, &traverse_layer, &func, &visited_map](node_idx layer_start)
+			{
+				if (layer_start == k_invalid) return;
+
+				node_idx current = layer_start;
+				// traverse each node in the layer
+				do
 				{
-					if (layer_start == k_invalid) return;
-
-					node_idx current = layer_start;
-					// traverse each node in the layer
-					do
+					// visit the node
+					if (visited_map[current] == false)
 					{
-						// visit the node
-						if (visited_map[current] == false)
-						{
-							func(current);
-						}
-						visited_map[current] = true;
+						func(current, parent(current));
+					}
+					visited_map[current] = true;
 
-						current = next_sib(current);
+					current = next_sib(current);
 
-					} while (current != layer_start);
+				} while (current != layer_start);
 
-					// reset current and now traverse the child layer of each node
-					current = layer_start;
-					do
-					{
-						traverse_layer(first_child(current));
-						current = next_sib(current);
-					} while (current != layer_start);
-				};
+				// reset current and now traverse the child layer of each node
+				current = layer_start;
+				do
+				{
+					traverse_layer(first_child(current));
+					current = next_sib(current);
+				} while (current != layer_start);
+			};
 
 			traverse_layer(first_child(start_node));
 		}
+	}
+
+	const vector<node>& get_flat() const
+	{
+		return m_nodes;
+	}
+
+	vector<node>& get_flat()
+	{
+		return m_nodes;
 	}
 
 	template <typename _pred>

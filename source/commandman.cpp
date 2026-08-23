@@ -3,7 +3,7 @@
 
 namespace strikers
 {
-command cm_log_cmds("log.clear", "0", command::flags::oneshot);
+command cm_log_cmds("log_commands", "0", command::flags::oneshot);
 
 command::command(const char* name, const char* default_value, flags flg)
     : m_name{ name }, m_default_value{ default_value }, m_value{ default_value }, m_flags{flg}
@@ -19,7 +19,7 @@ void command::set_value(const string& value)
     m_value = value;
     if (m_flags & flags::oneshot)
     {
-        m_lifetime = 2;
+        m_lifetime = 2; //
     }
 }
 
@@ -109,7 +109,6 @@ void commandman::command_script(const stringview& filepath)
 void commandman::tick()
 {
     command_script("D:/Git/strikers/commands.md");
-
     for (auto& cmd : m_commands)
     {
         cmd.second->tick();

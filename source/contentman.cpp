@@ -118,7 +118,7 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             (const aiNode& current_node, uint32 parent, const float4x4& parent_scene_transform)
             {
                 flatgraph<scene_asset::node>& graph = sc_asset.m_graph;
-                uint32 current_node_idx = parent == k_invalid ? graph.k_root : graph.add_node({}, parent);
+                uint32 current_node_idx = parent == k_invalid ? graph.add_node({}, graph.k_root) : graph.add_node({}, parent);
                 scene_asset::node& current_data = graph.get(current_node_idx).data();
 
                 // parse this node
@@ -127,6 +127,7 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
                 current_data.m_local_transform = local_transform;
                 current_data.m_scene_transform = scene_transform;
                 current_data.m_scene_transform_inv = glm::inverse(current_data.m_scene_transform);
+
                 const uint32 num_meshes = current_node.mNumMeshes;
                 current_data.m_meshes.resize(num_meshes);
                 for (uint32 i = 0u; i < num_meshes; ++i)
@@ -154,6 +155,19 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             sc_asset.m_cameras = camera_ids;
             allocate_asset<asset_type::scene>(sc_id, sc_asset, root_id);
         }
+
+#if 0 // log scene graph
+        sc_asset.m_graph.traverse([&sc_asset](uint32 c, uint32 p)
+        {
+            const auto& node = sc_asset.m_graph.get(c);
+            const auto& data = sc_asset.m_graph.get(c).data();
+
+            string message = data.m_name + "[num_m:{}]";
+            for (uint32 i = 0u; i < node.get_depth(); ++i)
+                message = "  " + message;
+            logman::log(message, data.m_meshes.size());
+        });
+#endif
 
         // parse cameras
         for (uint32 i = 0u; i < scene->mNumCameras; ++i)

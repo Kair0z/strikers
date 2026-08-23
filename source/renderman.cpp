@@ -2,21 +2,6 @@
 #include "contentman.h"
 #include "logman.h"
 
-#pragma comment(lib, "d3d12.lib")
-#pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "dxcompiler.lib")
-#pragma comment(lib, "dxil.lib")
-
-// pix
-#if DF_PIX
-#define USE_PIX 1
-#include "WinPixEventRuntime/pix3.h"
-#pragma comment(lib, "WinPixEventRuntime.lib")
-#if DF_PIX
-#define scoped_marker(_ctx, ...) PixScopedEvent(_ctx, __VA_ARGS__)
-#endif
-#endif
-
 static const char* k_vs_target = "vs_6_8";
 static const char* k_ps_target = "ps_6_8";
 static const char* k_cs_target = "cs_6_8";

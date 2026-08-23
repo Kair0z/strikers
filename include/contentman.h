@@ -64,7 +64,7 @@ struct scene_asset final
 	bool find_node_with_mesh(const mesh_id& mesh, uint32& out_node_idx)
 	{
 		int found_node = -1;
-		m_graph.traverse([this, mesh, &found_node](uint32 node_idx)
+		m_graph.traverse([this, mesh, &found_node](uint32 node_idx, uint32 parent_idx)
 		{
 			if (found_node >= 0) return;
 

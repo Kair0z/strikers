@@ -18,6 +18,21 @@
 #if DF_WINDOWS
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
+
+// dx12
+#include <d3d12.h>
+#include <dxgi1_6.h>
+#pragma comment(lib, "d3d12.lib")
+#pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "dxcompiler.lib")
+#pragma comment(lib, "dxil.lib")
+
+// pix
+#if DF_PIX
+#define USE_PIX 1
+#include "WinPixEventRuntime/pix3.h"
+#pragma comment(lib, "WinPixEventRuntime.lib")
+#endif
 #endif
 
 // linux
@@ -101,6 +116,11 @@ _t snap_if_tiny(const _t& value)
 	return value < eps ? (_t)0 : value;
 }
 
+inline float random_flt(const float min, const float max)
+{
+	return (float)rand() / (float)RAND_MAX * (max - min) + min;
+}
+
 #define format_f3 "{:.1f},{:.1f},{:.1f}"
 
 template <typename _t>
@@ -116,6 +136,12 @@ using float4 = glm::fvec4;
 using float4x4 = glm::mat4;
 using rotation = glm::quat;
 using color = float4;
+
+inline float2 lerp(const float2& a, const float2& b, float t)
+{
+	t = glm::clamp(t, 0.0f, 1.0f);
+	return float2(std::lerp(a.x, b.x, t), std::lerp(a.y, b.y, t));
+}
 
 namespace colors
 {
@@ -212,6 +238,9 @@ struct transform final
 public:
 	mat4x4 m_matrix{ 1 };
 
+	transform() = default;
+	transform(const mat4x4& mat) : m_matrix{ mat } {}
+
 	void add_rotation_camera(float yaw_delta, float pitch_delta)
 	{
 		constexpr float sensitivity = 0.002f;
@@ -262,6 +291,10 @@ public:
 	void look_at(const float3& position)
 	{
 		m_matrix = calculate_transform(get_position(), position);
+	}
+	void look_twd(const float3& forward)
+	{
+		look_at(get_position() + forward);
 	}
 	void set_scale(const float uniform)
 	{

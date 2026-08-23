@@ -1,32 +1,39 @@
 # camera
-camera.dev.control  1;
-camera.dev.reset    r;
-camera.dev.left     a;
-camera.dev.right    d;
-camera.dev.forward  w;
-camera.dev.back     s;
-camera.dev.up       space;
-camera.dev.down     shift;
+camera_dev_control  0;
+camera_dev_reset    o;
+camera_dev_left     a;
+camera_dev_right    d;
+camera_dev_forward  w;
+camera_dev_back     s;
+camera_dev_up       space;
+camera_dev_down     shift;
 
-camera.sensy        0.1;
-camera.maxspeed     500;
-camera.acceleration 100000;
+camera_sensy        0.1;
+camera_maxspeed     1000;
+camera_acceleration 100000000;
 
 # logging
-log.fps 1;
-log.clear 0;
-log.commands 0;
+log_fps 0;
+log_clear 0;
+log_commands 0;
 
 # game
-game.debug.reset;
-game.physics.enable 0;
-game.gravity.enable 0;
-game.airdensity 1.225;
+game_reset r;
+game_physics_enable 1;
+game_gravity_enable 0;
+game_airdrag 1.225;
+game_movement_acc 1000000;
+game_movement_mxsp 1000;
+
+game_ai 1;
+game_ai_min_dtime 0.1;
+game_ai_max_dtime 1.1;
+game_ai_random 0.0000000001;
 
 # physics
-phys.debug.disable 1;
-phys.timestep 10;
+phys_debug_disable 1;
+phys_timestep 10;
 
 # draw
-draw.debug 1;
-draw.debug.physics 0;
+draw_debug 0;
+draw_debug_phys1cs 0;

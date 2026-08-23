@@ -6,8 +6,8 @@
 
 namespace strikers {
 
-command cm_phys_debug_disable("phys.debug.disable", "1");
-command cm_phys_timestep("phys.timestep", "10");
+command cm_phys_debug_disable("phys_debug_disable", "1");
+command cm_phys_timestep("phys_timestep", "10");
 
 b3Pos translate(const float3& f3)
 {
