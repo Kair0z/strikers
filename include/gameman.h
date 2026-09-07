@@ -1,51 +1,212 @@
 #include "common.h"
-#include "physman.h"
 #include "components.h"
 #include "flatgraph.h"
+#include "transman.h"
+
+#define on_cooldown(condition, delta, cd) \
+	{ \
+	static float s_timer = 0.0f; \
+	s_timer -= delta;\
+	bool is_tick = s_timer < 0; \
+	if (is_tick && condition) s_timer = cd; \
+	if (is_tick && condition)\
 
 namespace strikers {
 class renderscene;
 class contentman;
-class gameman
+
+class colman final
 {
+public:
+	struct collider_entry
+	{
+		box m_aabb;
+		vector<uint32> m_collisions{};
+	};
+	struct collision_info
+	{
+		uint32 m_collider_y;
+		uint32 m_collider_x;
+		float3 m_overlap{};
+	};
+
+	void write_aabb(const uint32 slot, const box& aabb)
+	{
+		// resize if necessary
+		const uint32 new_size = slot + 1;
+		m_collisions.reserve(new_size * new_size);
+		if (m_colliders.size() <= new_size) 
+			m_colliders.resize(new_size);
+		
+		m_colliders[slot].m_aabb = aabb;
+	}
+
+	void calculate_collisions()
+	{
+		for (uint32 x = 0u; x < m_colliders.size(); ++x)
+			m_colliders[x].m_collisions.clear();
+
+		m_collisions.clear();
+		for (uint32 y = 0u; y < m_colliders.size(); ++y)
+		{
+			for (uint32 x = 0u; x < m_colliders.size(); ++x)
+			{
+				// only test half of the matrix
+				if (x <= y) continue;
+
+				float3 collision_overlap{};
+				const bool is_collision = box::calculate_collision(m_colliders[x].m_aabb, m_colliders[y].m_aabb, &collision_overlap);
+				if (is_collision)
+				{
+					m_collisions.push_back({});
+					const uint32 collision_index = (uint32)m_collisions.size() - 1;
+					collision_info& collision = m_collisions[collision_index];
+					collision.m_collider_y = y;
+					collision.m_collider_x = x;
+					collision.m_overlap = collision_overlap;
+					m_colliders[y].m_collisions.push_back(collision_index);
+					m_colliders[x].m_collisions.push_back(collision_index);
+				}
+			}
+		}
+	}
+
+	uint32 num_collisions() const
+	{
+		return (uint32)m_collisions.size();
+	}
+
+	uint32 num_collisions(const uint32 slot) const
+	{
+		return (uint32)m_colliders[slot].m_collisions.size();
+	}
+
+	const collision_info& get_collision_at_index(const uint32 slot, uint32 index)
+	{
+		return m_collisions[m_colliders[slot].m_collisions[index]];
+	}
+
+	bool test_collision(const box& aabb, const float3 delta_position, float3& out_) const
+	{
+		for (uint32 x = 0u; x < m_colliders.size(); ++x)
+		{
+			if (box::calculate_collision(aabb, m_colliders[x].m_aabb))
+				return true;
+		}
+		return false;
+	}
+	
+private:
+	vector<collider_entry> m_colliders{};
+	vector<collision_info> m_collisions{};
+};
+
+class gameman final
+{
+	// per team data
+	struct team
+	{
+	};
+
 	// per player data
 	struct player_data final
 	{
-		uint32 current_movement = 0u;
+		uint32 m_current_local_runner;
 	};
-	player_data m_players[2];
-
-	struct ball_data final
-	{
-		actor_id m_actor;
-	};
-	ball_data m_ball;
-
-	struct transform_entry final
-	{
-		transform m_local_reset;
-		transform m_world;
-		transform m_local;
-		string m_name;
-	};
-	using transform_graph = flatgraph<transform_entry>;
-	using transform_id = transform_graph::node_idx;
-	transform_graph m_transform_graph;
-
-	struct actor final
+	
+	// any 'runner' pawn that runs on the pitch
+	struct runner final
 	{
 		enum flags
 		{
 			none = 0,
 			kritter = (1 << 0),
-			toad	= (1 << 1),
-			ball	= (1 << 2),
+			toad = (1 << 1),
+			ball = (1 << 2),
+			mario = (1 << 3),
+			luigi = (1 << 4)
 		};
 
-		uint32 m_flags;
+		actor_id m_actor = k_actor_invalid;
+		uint32 m_flags = 0u;
+	};
+
+	// the ball state
+	struct ball final
+	{
+		enum state
+		{
+			idle,
+			keeper,
+			dribbled,
+			passing,
+			launching,
+			num
+		};
+
+		struct {
+			uint32 m_runner_source;
+			uint32 m_runner_dest;
+		} m_pass;
+		struct {
+			uint32 m_runner_dribble;
+		} m_dribble;
+		struct {
+			float3 m_point_source;
+			float3 m_point_dest;
+		} m_launch;
+
+		actor_id m_actor;
+		state m_state;
+		float m_charge = 0.0f;
+	};
+
+	player_data m_players[2];
+	team m_teams[2];
+	runner m_runners[k_num_runners_per_team * 2];
+	ball m_ball;
+
+	runner& get_runner(uint32 team_idx, uint32 local_idx) { return m_runners[get_runner_idx(team_idx, local_idx)]; }
+	runner& get_runner(uint32 index) { return m_runners[index]; }
+	uint32 get_runner_team_idx(uint32 runner_idx) const { return runner_idx / k_num_runners_per_team; }
+	uint32 get_runner_local_idx(uint32 runner_idx) const { return runner_idx % k_num_runners_per_team; }
+	uint32 get_runner_idx(const uint32 team_idx, uint32 local_idx) { return (k_num_runners_per_team * team_idx) + local_idx; }
+	void set_runner_active(const uint32 team_idx, uint32 local_idx)
+	{
+		m_players[team_idx].m_current_local_runner = local_idx;
+	}
+	void set_runner_active(const uint32 index)
+	{
+		const uint32 team = get_runner_team_idx(index);
+		const uint32 local = get_runner_local_idx(index);
+		set_runner_active(team, local);
+	}
+
+	void ball_start_dribble(const uint32 runner_idx)
+	{
+		m_ball.m_dribble.m_runner_dribble = runner_idx;
+		m_ball.m_state = ball::state::dribbled;
+		set_runner_active(runner_idx);
+	}
+	void ball_pass(const uint32 runner_source, const uint32 runner_dest)
+	{
+		m_ball.m_pass.m_runner_dest = runner_dest;
+		m_ball.m_pass.m_runner_source = runner_source;
+		m_ball.m_state = ball::state::passing;
+	}
+	bool ball_held_by_runner(const uint32 rnn) const
+	{
+		if (m_ball.m_state != ball::dribbled) return false;
+		return m_ball.m_dribble.m_runner_dribble == rnn;
+	}
+
+	// any actor that has a transform in the scene
+	struct actor final
+	{
 		actor_id m_id;
-		transform_id m_transform_id;
+		trans_id m_transform_id;
 		uint64 m_component_idxs[component::k_num_types]{ k_component_invalid };
+		bool m_is_static = false;
 
 		actor()
 		{
@@ -66,6 +227,12 @@ class gameman
 			return m_component_idxs[(int)type] != k_component_invalid;
 		}
 	};
+
+	void actor_set_static(actor_id id, bool is_static)
+	{
+		m_actors[id].m_is_static = is_static;
+	}
+	bool actor_is_static(actor_id id) const { return m_actors[id].m_is_static; }
 
 private:
 	template <component::type _t>
@@ -111,27 +278,6 @@ private:
 	camera m_camera;
 
 	vector<actor> m_actors;
-
-	const transform_entry& get_actor_transform(const actor_id id) const
-	{
-		const transform_id trans_id = m_actors[id].m_transform_id;
-		return m_transform_graph.get(trans_id).data();
-	}
-	transform_entry& get_actor_transform(const actor_id id)
-	{
-		const transform_id trans_id = m_actors[id].m_transform_id;
-		return m_transform_graph.get(trans_id).data();
-	}
-
-	void set_actor_flag(actor_id actor, actor::flags flag, bool enabled = true)
-	{
-		m_actors[actor].m_flags |= (uint32)flag;
-	}
-
-	bool actor_has_flag(actor_id actor, actor::flags flag) const
-	{
-		return m_actors[actor].m_flags & flag;
-	}
 
 	template <component::type _t>
 	component_t<_t>& add_component(actor_id owner)
@@ -179,15 +325,13 @@ private:
 		actor& new_actor = m_actors[new_id];
 
 		// add a transform
-		transform_entry transform{};
 		if (parent == k_actor_invalid)
 		{
-			new_actor.m_transform_id = m_transform_graph.add_node(transform);
+			new_actor.m_transform_id = m_transman.add_world_transform(transform::identity());
 		}
 		else
 		{
-			const transform_id parent_trans_id = m_actors[parent].m_transform_id;
-			new_actor.m_transform_id = m_transform_graph.add_node(transform, parent_trans_id);
+			new_actor.m_transform_id = m_transman.add_world_transform(transform::identity(), m_actors[parent].m_transform_id);
 		}
 		return new_id;
 	}
@@ -224,9 +368,26 @@ private:
 public:
 	void start(const contentman& cman);
 	void tick(float seconds, float delta_seconds);
-	void build_renderscene(const contentman& cman, renderscene& scene) const;
+	void build_renderscene(const contentman& cman, renderscene& scene);
 
 private:
 	void assemble_fbx_scene(const contentman& cman, const stringview& filepath);
+	void reset();
+
+	transman m_transman;
+	trans_id actor_transform(actor_id id) { return m_actors[id].m_transform_id; }
+	void actor_set_transform(actor_id id, const transform& trans, space spc)	{ if (!actor_is_static(id)) m_transman.set_transform(actor_transform(id), trans, spc); }
+	void actor_set_position(actor_id id, const float3& position, space spc)		{ if (!actor_is_static(id)) m_transman.set_position(actor_transform(id), position, spc); }
+	void actor_set_rotation(actor_id id, const rotation& rotation, space spc)	{ if (!actor_is_static(id)) m_transman.set_rotation(actor_transform(id), rotation, spc); }
+	void actor_set_scale(actor_id id, const float3& scale, space spc)			{ if (!actor_is_static(id)) m_transman.set_scale(actor_transform(id), scale, spc); }
+	transform actor_get_transform(actor_id id, space spc)						{ return m_transman.get_transform(actor_transform(id), spc); }
+	float3 actor_get_position(actor_id id, space spc)							{ return m_transman.get_position(actor_transform(id), spc); }
+	rotation actor_get_rotation(actor_id id, space spc)							{ return m_transman.get_rotation(actor_transform(id), spc); }
+	float3 actor_get_scale(actor_id id, space spc)								{ return m_transman.get_scale(actor_transform(id), spc); }
+	void actor_add_position(actor_id id, const float3& delta, space spc)		{ if (!actor_is_static(id)) m_transman.add_position(actor_transform(id), delta, spc); }
+	void actor_add_rotation(actor_id id, const rotation& delta, space spc)		{ if (!actor_is_static(id)) m_transman.add_rotation(actor_transform(id), delta, spc); }
+	void actor_mult_scale(actor_id id, const float3& multiplier, space spc)		{ if (!actor_is_static(id)) m_transman.mult_scale(actor_transform(id), multiplier, spc); }
+	
+	colman m_colman;
 };
 }

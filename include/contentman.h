@@ -194,6 +194,7 @@ struct material_asset final
 {
 	mat_id m_mat_id;
 	string m_name;
+	color m_basecolor;
 	image_id m_tex_basecolor = k_id_invalid;
 };
 

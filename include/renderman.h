@@ -34,17 +34,56 @@ struct gpu_bone
 	float4x4 m_matrix;
 	int m_parent;
 };
-struct gpu_cbuffer
+struct gpu_cbuffer_global
 {
-	mat4x4 m_viewprojection;
+	float4x4 m_mat_to_lightspace;
 	float4 m_light_color;
 	float4 m_light_direction;
+	uint32 m_texid_shadows;
+};
+struct gpu_cbuffer_view
+{
+	mat4x4 m_viewprojection;
+};
+struct gpu_cbuffer_material
+{
+
 };
 struct gpu_line_instance
 {
 	float4 m_color;
 	float3 m_point_a;
 	float3 m_point_b;
+};
+
+struct cbuffer final
+{
+	enum slot
+	{
+		global,
+		view,
+		num
+	};
+
+	static uint64 get_bytesize(slot slt)
+	{
+		switch (slt)
+		{
+		case cbuffer::slot::global: return sizeof(gpu_cbuffer_global);
+		case cbuffer::slot::view: return sizeof(gpu_cbuffer_view);
+		}
+		return 0u;
+	}
+};
+
+struct view final
+{
+	enum slot
+	{
+		main,
+		light,
+		num
+	};
 };
 
 class contentman;
@@ -80,6 +119,7 @@ public:
 		float m_far;
 	} m_camera;
 	struct {
+		float4x4 m_mat_to_lightspace;
 		float4 m_color;
 		float4 m_direction;
 	} m_light;
@@ -316,103 +356,300 @@ public:
 		}
 };
 
-class renderman final
+struct descriptor_heap final
 {
-	static constexpr uint32 k_num_swapchain_buffers = 3;
-
-	enum class descriptor_heap
-		{
-			rtv,
-			dsv,
-			resource,
-			sampler,
-			gpu_resource,
-			gpu_sampler,
-			num
-		};
-	static constexpr uint32 k_num_descriptor_heaps = (uint32)descriptor_heap::num;
-	static constexpr uint32 k_descriptor_heap_nums[k_num_descriptor_heaps]
+	enum slot
 	{
+		rtv,
+		dsv,
+		resource,
+		sampler,
+		gpu_resource,
+		gpu_sampler,
+		num
+	};
+
+	static const uint32 capacity(slot slt)
+	{
+		static const uint32 c_capacities[num]{
 			16,
 			16,
-			16,
+			32, // resource
 			16,
 			16,
 			16
 		};
-	static const uint32 get_descheap_size(descriptor_heap heap)
-		{
-			static const uint32 k_sizes[k_num_descriptor_heaps]
-			{
-				16,
-				16,
-				16,
-				16,
-				16,
-				16
-			};
-			return k_sizes[(int)heap];
-		}
-	static const D3D12_DESCRIPTOR_HEAP_TYPE get_descheap_type(descriptor_heap heap)
-		{
-			static const D3D12_DESCRIPTOR_HEAP_TYPE k_types[k_num_descriptor_heaps]
-			{
-				D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
-				D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
-				D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-				D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
-				D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-				D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER
-			};
-			return k_types[(int)heap];
-		}
-	static const bool is_descheap_gpu_readable(descriptor_heap heap)
-		{
-			return heap == descriptor_heap::gpu_resource || heap == descriptor_heap::gpu_sampler;
-		}
-	enum class descriptor_type
-		{
-			rtv,
-			dsv,
-			uav,
-			cbv,
-			srv,
-			sampler,
-			num
-		};
-	static constexpr uint32 k_num_descriptor_types = (uint32)descriptor_type::num;
-	static const bool can_gpu_read_descriptor(descriptor_type type)
-		{
-			return (type != descriptor_type::rtv) && (type != descriptor_type::dsv);
-		}
-	static const descriptor_heap get_descheap_type(descriptor_type type, bool gpu_readable)
-		{
-			descriptor_heap heap_type{};
-			switch (type)
-			{
-			case descriptor_type::rtv:
-				return descriptor_heap::rtv;
-				break;
-			case descriptor_type::dsv:
-				return descriptor_heap::dsv;
-				break;
-			case descriptor_type::uav:
-			case descriptor_type::cbv:
-			case descriptor_type::srv:
-				return (gpu_readable ? descriptor_heap::gpu_resource : descriptor_heap::resource);
-			case descriptor_type::sampler:
-				return (gpu_readable ? descriptor_heap::gpu_sampler : descriptor_heap::sampler);
-				break;
-			}
-			return descriptor_heap::num;
-		}
-	struct descriptor final
-		{
-			descriptor_heap m_owner;
-			descriptor_type m_type;
-			uint32 m_heap_idx;
-		};
+		return c_capacities[slt];	
+	}
 
+	static const D3D12_DESCRIPTOR_HEAP_TYPE dxtype(slot slt)
+	{
+		static const D3D12_DESCRIPTOR_HEAP_TYPE k_types[num]
+		{
+			D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
+			D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
+			D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+			D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+			D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+			D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER
+		};
+		return k_types[(int)slt];
+	}
+
+	static const bool is_gpu_heap(slot slt)
+	{
+		return slt == gpu_resource || slt == gpu_sampler;
+	}
+};
+
+struct descriptor final
+{
+	enum type
+	{
+		rtv,
+		dsv,
+		uav,
+		cbv,
+		srv,
+		sampler,
+		num
+	};
+
+	struct builder final
+	{
+		type m_type;
+		uint32 m_first_element;
+		uint32 m_num_elements;
+		uint32 m_bytestride;
+		DXGI_FORMAT m_format;
+		bool m_view_as_array = false;
+		bool m_gpu_readable = false;
+		bool m_format_override = false;
+
+		builder& type(type type) { m_type = type; return *this; }
+		builder& gpu_heap(bool yes) { m_gpu_readable = yes; return *this; }
+		builder& view_as_array(bool yes) { m_view_as_array = yes; return *this; }
+		builder& format(DXGI_FORMAT format) { m_format = format; m_format_override = true; return *this; }
+
+		// only relevant for buffers:
+		builder& bff_first_element(uint32 first) { m_first_element = first; return *this; }
+		builder& bff_num_elements(uint32 num) { m_num_elements = num; return *this; }
+		builder& bff_bytestride(uint32 stride) { m_bytestride = stride; return *this; }
+	};
+
+	static const bool is_gpu_readable(type tpe)
+	{
+		return tpe != rtv && tpe != dsv;
+	}
+
+	static const descriptor_heap::slot dest_heap(type tpe, bool gpu_readable)
+	{
+		switch (tpe)
+		{
+		case descriptor::rtv:
+			return descriptor_heap::rtv;
+			break;
+		case descriptor::dsv:
+			return descriptor_heap::dsv;
+			break;
+		case descriptor::uav:
+		case descriptor::cbv:
+		case descriptor::srv:
+			return (gpu_readable ? descriptor_heap::gpu_resource : descriptor_heap::resource);
+		case descriptor::sampler:
+			return (gpu_readable ? descriptor_heap::gpu_sampler : descriptor_heap::sampler);
+			break;
+		}
+		return descriptor_heap::num;
+	}
+
+	descriptor_heap::slot m_owner;
+	type m_type;
+	uint32 m_heap_idx;
+};
+
+struct gpu_resource
+{
+	enum type
+	{
+		buffer,
+		texture,
+		num
+	};
+
+	struct builder
+	{
+		uint64 m_bytestride;
+		uint64 m_bytesize;
+		uint32 m_num_mips = 1;
+		uint3 m_sizes = uint3(1, 1, 1);
+		type m_type = type::buffer;
+		D3D12_RESOURCE_STATES m_init_state = D3D12_RESOURCE_STATE_COMMON;
+		D3D12_HEAP_TYPE m_heap_type = D3D12_HEAP_TYPE_DEFAULT;
+		D3D12_RESOURCE_FLAGS m_create_flags = D3D12_RESOURCE_FLAG_NONE;
+		DXGI_FORMAT m_format = DXGI_FORMAT_UNKNOWN;
+		float m_clear_value_depth = 0.0f;
+		uint8 m_clear_value_stencil = 0u;
+		float4 m_clear_value_color = {};
+		bool m_has_clear_value = false;
+
+		builder& size_x(uint32 size) { m_sizes.x = size; return *this; }
+		builder& size_y(uint32 size) { m_sizes.y = size; return *this; }
+		builder& size_z(uint32 size) { m_sizes.z = size; return *this; }
+		builder& bytestride(uint64 stride) { m_bytestride = stride; return *this; }
+		builder& bytesize(uint64 size) { m_bytesize = size; return *this; }
+		builder& init_state(D3D12_RESOURCE_STATES state) { m_init_state = state; return *this; }
+		builder& heap_type(D3D12_HEAP_TYPE type) { m_heap_type = type; return *this; }
+		builder& type(type tpe) { m_type = tpe; return *this; }
+		builder& num_mips(uint32 num_mips) { m_num_mips = num_mips; return *this; }
+		builder& create_flags(D3D12_RESOURCE_FLAGS flags) { m_create_flags = flags; return *this; }
+		builder& format(DXGI_FORMAT format) { m_format = format; return *this; }
+
+		builder& clear_value_color(const float4& color) { m_clear_value_color = color; m_has_clear_value = true; return *this; }
+		builder& clear_value_depth(const float depth) { m_clear_value_depth = depth; m_has_clear_value = true;  return *this; }
+		builder& clear_value_stencil(const uint8 stencil) { m_clear_value_stencil = stencil; m_has_clear_value = true; return *this; }
+
+		builder& texture2D(uint32 x, uint32 y) {
+			return type(type::texture).size_x(x).size_y(y);
+		}
+
+		template <typename _t>
+		builder& buffer_with_num(uint32 num) {
+			return bytestride(sizeof(_t))
+				.bytesize(sizeof(_t) * num)
+				.type(gpu_resource::buffer);
+		}
+
+		builder& buffer_single(uint64 bytesize)
+		{
+			return bytestride(bytesize)
+				.bytesize(bytesize)
+				.type(type::buffer);
+		}
+
+		builder& cbuffer()
+		{
+			// D3D12 ERROR: ID3D12Device::CreateConstantBufferView: Size of 32 is invalid.  
+			// Device requires SizeInBytes be a multiple of 256
+			return bytesize(max(256u, (uint32)m_bytesize));
+		}
+	};
+
+	static result<gpu_resource> allocate(dxdevice& dev, const builder& builder)
+	{
+		using restype = result<gpu_resource>;
+
+		const bool is_buffer = builder.m_type == gpu_resource::type::buffer;
+		if (!is_buffer && (builder.m_sizes.x == 0 || builder.m_sizes.y == 0 || builder.m_sizes.z == 0))
+			return restype::make_fail("invalid size for a texture resource!");
+
+		D3D12_HEAP_PROPERTIES heap_props{};
+		heap_props.Type = builder.m_heap_type;
+
+		D3D12_RESOURCE_DESC desc = {};
+		desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+		if (!is_buffer)
+		{
+			desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+			if (builder.m_sizes.y > 1) desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+			if (builder.m_sizes.z > 1)
+			{
+				desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+			}
+		}
+
+		desc.Width = is_buffer ? builder.m_bytesize : builder.m_sizes.x;
+		desc.Height = is_buffer ? 1 : builder.m_sizes.y;
+		desc.DepthOrArraySize = is_buffer ? 1 : builder.m_sizes.z;
+		desc.MipLevels = builder.m_num_mips;
+		desc.SampleDesc.Count = 1;
+		desc.Layout = is_buffer ? D3D12_TEXTURE_LAYOUT_ROW_MAJOR : D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+		// When D3D12_RESOURCE_DESC::Layout is D3D12_TEXTURE_LAYOUT_ROW_MAJOR, the D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL flag cannot be set
+		if (builder.m_create_flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL
+			|| builder.m_create_flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET
+			|| builder.m_create_flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+			desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+		desc.Flags = builder.m_create_flags;
+		desc.Format = builder.m_format;
+
+		D3D12_CLEAR_VALUE* clear_value = nullptr;
+		if (builder.m_has_clear_value)
+		{
+			// this is a pretty nasty way of doing this, but I'd rather just not allocate on heap :)
+			// just never call this with 2 threads and we're fine.
+			static D3D12_CLEAR_VALUE clear{}; clear = {};
+			clear.Format = desc.Format;
+			memcpy(clear.Color, &builder.m_clear_value_color, sizeof(float4));
+			clear.DepthStencil.Depth = builder.m_clear_value_depth;
+			clear.DepthStencil.Stencil = builder.m_clear_value_stencil;
+			clear_value = &clear;
+		}
+
+		dxresource* resource;
+		HRESULT hres = dev.CreateCommittedResource(
+			&heap_props,
+			D3D12_HEAP_FLAG_NONE,
+			&desc,
+			builder.m_init_state,
+			clear_value,
+			IID_PPV_ARGS(&resource)
+		);
+
+		gpu_resource result{};
+		result.m_builder = builder;
+		result.m_resource = resource;
+		result.m_current_state = builder.m_init_state;
+		result.m_previous_state = D3D12_RESOURCE_STATE_COMMON;
+		if (!SUCCEEDED(hres))
+		{
+			return restype::make_fail("");
+		}
+		else return restype::make_success(result);
+	}
+
+	bool is_valid() const { return m_resource != nullptr; }
+
+	bool get_dxdesc(D3D12_RESOURCE_DESC& out_desc)
+	{
+		if (is_valid())
+		{
+			out_desc = m_resource->GetDesc(); return true;
+		}
+		else return false;
+	}
+	dxresource* m_resource = nullptr;
+	builder m_builder;
+	dxresource_state m_previous_state;
+	dxresource_state m_current_state;
+};
+
+template <typename _t, typename _fn>
+result<> map_resource(dxresource& resource, _fn&& func)
+{
+	using restype = result<>;
+	void* out_address;
+	HRESULT hres = resource.Map(0, nullptr, &out_address);
+	if (!SUCCEEDED(hres))
+	{
+		return restype::make_fail("");
+	}
+
+	func((_t*)out_address);
+	resource.Unmap(0, nullptr);
+	return result<>::make_success();
+}
+
+template <typename _t, typename _fn>
+result<> map_resource(gpu_resource& resource, _fn&& func)
+{
+	return map_resource<_t>(*resource.m_resource, func);
+}
+
+
+class renderman final
+{
 	dxfactory* m_factory;
 	dxdevice* m_device;
 	dxqueue* m_queue;
@@ -423,93 +660,95 @@ class renderman final
 	uint64 m_frame;
 	shaderman m_shaderman;
 
-	struct resource
-		{
-			dxresource* m_dxresource;
-			dxresource_state m_previous_state;
-		};
+	struct shadowmap
+	{
+		gpu_resource m_resource;
+		descriptor m_dsv;
+		descriptor m_srv;
+	};
+	shadowmap m_shadows;
 
 	struct swapchain final
-		{
-			dxswapchain* m_swapchain;
-			dxresource* m_buffers[k_num_swapchain_buffers];
-			dxresource* m_depth;
-			descriptor m_rtvs[k_num_swapchain_buffers];
-			descriptor m_dsv;
-			dxresource* m_uav_proxy_resource;
-			descriptor m_uav_proxy;
-			uint2 m_current_size;
+	{
+		dxswapchain* m_swapchain;
+		gpu_resource m_buffers[k_num_swapchain_buffers];
+		gpu_resource m_depth;
+		descriptor m_rtvs[k_num_swapchain_buffers];
+		descriptor m_dsv;
+		gpu_resource m_uav_proxy_resource;
+		descriptor m_uav_proxy;
+		uint2 m_current_size;
 
-			uint32 get_current_backbuffer_idx() const
-			{
-				return m_swapchain->GetCurrentBackBufferIndex();
-			}
-			const descriptor& get_current_backbuffer_rtv() const
-			{
-				return m_rtvs[get_current_backbuffer_idx() % k_num_swapchain_buffers];
-			}
-			dxresource& get_current_backbuffer_resource() const
-			{
-				return *m_buffers[get_current_backbuffer_idx() % k_num_swapchain_buffers];
-			}
-		};
+		uint32 get_current_backbuffer_idx() const
+		{
+			return m_swapchain->GetCurrentBackBufferIndex();
+		}
+		const descriptor& get_current_backbuffer_rtv() const
+		{
+			return m_rtvs[get_current_backbuffer_idx() % k_num_swapchain_buffers];
+		}
+		gpu_resource& get_current_backbuffer_resource()
+		{
+			return m_buffers[get_current_backbuffer_idx() % k_num_swapchain_buffers];
+		}
+	};
 	vector<swapchain> m_swapchains{};
 	umap<void*, uint32> m_swapchain_lookup{};
 
 	struct descheap final
+	{
+		dxdescheap* m_dxheap;
+		uint32 m_handle_size;
+		uint32 m_stack_ptr;
+		descriptor_heap::slot m_slot;
+
+		result<uint32> allocate()
 		{
-			dxdescheap* m_dxheap;
-			uint32 m_handle_size;
-			uint32 m_stack_ptr;
-			descriptor_heap m_type;
-
-			result<uint32> allocate()
+			using restype = result<uint32>;
+			if (m_stack_ptr >= descriptor_heap::capacity(m_slot))
 			{
-				using restype = result<uint32>;
-				if (m_stack_ptr >= k_descriptor_heap_nums[(uint32)m_type])
-				{
-					return restype::make_fail("out of descriptors!");
-				}
-
-				return m_stack_ptr++;
+				return restype::make_fail("out of descriptors!");
 			}
 
-			bool is_descriptor_id_valid(uint32 id) const
-			{
-				return id < m_stack_ptr;
-			}
-
-			result<> get_handles(uint32 id, 
-				D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu_handle,
-				D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_handle = nullptr) const
-			{
-				using restype = result<>;
-				if (!is_descriptor_id_valid(id)) 
-					return restype::make_fail("get_handles() > invalid id!");
-				
-				if (out_cpu_handle)
-				{
-					*out_cpu_handle = (D3D12_CPU_DESCRIPTOR_HANDLE)(m_dxheap->GetCPUDescriptorHandleForHeapStart().ptr + (id * m_handle_size));
-				}
-				if (out_gpu_handle && is_descheap_gpu_readable(m_type))
-				{
-					*out_gpu_handle = (D3D12_GPU_DESCRIPTOR_HANDLE)(m_dxheap->GetGPUDescriptorHandleForHeapStart().ptr + (id * m_handle_size));
-				}
-				return {};
-			}
-		};
-	descheap m_descheaps[k_num_descriptor_heaps];
-	descheap& get_descheap(descriptor_heap type)
-		{
-			m_descheaps[(int)type].m_type = type;
-			return m_descheaps[(int)type];
+			return m_stack_ptr++;
 		}
+
+		bool is_descriptor_id_valid(uint32 id) const
+		{
+			return id < m_stack_ptr;
+		}
+
+		result<> get_handles(uint32 id, 
+			D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu_handle,
+			D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_handle = nullptr) const
+		{
+			using restype = result<>;
+			if (!is_descriptor_id_valid(id)) 
+				return restype::make_fail("get_handles() > invalid id!");
+			
+			if (out_cpu_handle)
+			{
+				*out_cpu_handle = (D3D12_CPU_DESCRIPTOR_HANDLE)(m_dxheap->GetCPUDescriptorHandleForHeapStart().ptr + (id * m_handle_size));
+			}
+			if (out_gpu_handle && descriptor_heap::is_gpu_heap(m_slot))
+			{
+				*out_gpu_handle = (D3D12_GPU_DESCRIPTOR_HANDLE)(m_dxheap->GetGPUDescriptorHandleForHeapStart().ptr + (id * m_handle_size));
+			}
+			return {};
+		}
+	};
+	descheap m_descheaps[descriptor_heap::num];
+	descheap& get_descheap(descriptor_heap::slot slt)
+	{
+		m_descheaps[(int)slt].m_slot = slt;
+		return m_descheaps[(int)slt];
+	}
 
 	enum pipeline
 	{
 		cpip_skinning,
 		cpip_num,
-
+		pip_shadows,
 		pip_shading,
 		pip_wireframe,
 		pip_lines,
@@ -545,42 +784,59 @@ class renderman final
 
 	struct meshbuffers final
 	{
-		dxresource* m_vertex_stagingbuffer;
-		dxresource* m_index_stagingbuffer;
-		dxresource* m_vertbuffer;
-		dxresource* m_indbuffer;
+		gpu_resource m_vertex_stagingbuffer;
+		gpu_resource m_index_stagingbuffer;
+		gpu_resource m_vertbuffer;
+		gpu_resource m_indbuffer;
 		D3D12_VERTEX_BUFFER_VIEW m_vtb_view;
 		D3D12_INDEX_BUFFER_VIEW m_idx_view;
 		bool m_uploaded = false;
 
-		uint32 get_num_vertices() const { return m_vertbuffer ? (uint32)(m_vertbuffer->GetDesc().Width / sizeof(gpu_vertex)) : 0; }
-		uint32 get_num_indices() const { return m_indbuffer ? (uint32)(m_indbuffer->GetDesc().Width / sizeof(uint32)) : 0; }
+		uint32 get_num_vertices() const { return m_vertbuffer.is_valid() ? (uint32)(m_vertbuffer.m_resource->GetDesc().Width / sizeof(gpu_vertex)) : 0; }
+		uint32 get_num_indices() const { return m_indbuffer.is_valid() ? (uint32)(m_indbuffer.m_resource->GetDesc().Width / sizeof(uint32)) : 0; }
 	};
 	umap<mesh_id, meshbuffers> m_mesh_buffers;
-	dxresource* m_instancebuffer;
+	gpu_resource m_instancebuffer;
+	gpu_resource m_instancebuffer_ui;
+	gpu_resource m_instancebuffer_lines;
 	descriptor m_instancebuffer_srv;
-	dxresource* m_instancebuffer_ui;
 	descriptor m_instancebuffer_ui_srv;
-	dxresource* m_instancebuffer_lines;
 	descriptor m_instancebuffer_lines_srv;
-	dxresource* m_constantbuffer;
-	descriptor m_constantbuffer_cbv;
+	
+	struct cbuffers final
+	{
+		vector<gpu_resource> m_resources[cbuffer::num];
+		vector<descriptor> m_cbvs[cbuffer::num];
+
+		void ensure_allocated(renderman& owner, cbuffer::slot slot, uint32 idx);
+		uint32 num(cbuffer::slot slot) const;
+		gpu_resource& resource(cbuffer::slot slot, uint32 idx = 0u);
+		descriptor* cbv(cbuffer::slot slot, uint32 idx = 0u);
+
+		template <typename _fn>
+		void write_data(cbuffer::slot slot, uint32 idx, _fn&& func)
+		{
+			map_resource<void>(resource(slot, idx), [&func](void* dest) { func(dest); });
+		}
+	};
+	cbuffers m_cbuffers;
+	
 	dxresource* m_bonebuffer;
 	descriptor m_bonebuffer_srv;
 
 	struct skeletonbuffers final
 	{
-		dxresource* m_bone_buffer;			// static bone data from content
-		dxresource* m_bone_buffer_staging;	// static bone data from content
-		dxresource* m_skinned_buffer;		// output of the GPU skinning
+		gpu_resource m_bone_buffer;			// static bone data from content
+		gpu_resource m_bone_buffer_staging;	// static bone data from content
+		gpu_resource m_skinned_buffer;		// output of the GPU skinning
 		bool m_uploaded = false;
 	};
 	umap<skel_id, skeletonbuffers> m_skel_buffers;
 
 	struct texture
 	{
-		dxresource* m_staging_resource;
-		dxresource* m_gpu_resource;
+		gpu_resource m_staging_resource;
+		gpu_resource m_gpu_resource;
 		descriptor m_srv;
 
 		bool m_uploaded = false;
@@ -592,10 +848,10 @@ public:
 	result<> initialize();
 
 	void compile_shaders();
-
 	void compile_pipelines();
 
 	void cmd_transition_barrier(dxresource& resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
+	void cmd_transition_barrier(gpu_resource& resource, D3D12_RESOURCE_STATES after);
 
 	void clear_gpu_heaps();
 
@@ -603,15 +859,16 @@ public:
 		dxdevice& device, 
 		const descriptor& source_descriptor,
 		uint32& out_gpu_heap_index,
-		D3D12_GPU_DESCRIPTOR_HANDLE& out_gpu_handle);
+		D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_handle = nullptr);
 
 	void render(renderscene& scene, const contentman& contentman);
+	void render_shadows(renderscene& scene, const contentman& contentman);
 
-	struct descriptor_args final
-		{
-			D3D12_BUFFER_SRV m_buffer_srv{};
-		};
-	result<descriptor> create_resource_descriptor(dxresource& resource, descriptor_type type, bool gpu_readable, const descriptor_args& args = {});
+	result<descriptor> create_resource_descriptor(dxresource& resource, const descriptor::builder& builder);
+	result<descriptor> create_resource_descriptor(gpu_resource& resource, const descriptor::builder& builder)
+	{
+		return create_resource_descriptor(*resource.m_resource, builder);
+	}
 
 	result<> register_window(void* platform_handle);
 

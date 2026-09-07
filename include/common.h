@@ -48,18 +48,28 @@
 #include "glm/ext/matrix_clip_space.hpp"
 namespace strikers {
 
+// common types
+using int32 = int;
+using f32 = float;
+using uint8 = unsigned char;
+using uint32 = uint32_t;
+using uint64 = uint64_t;
+
 // constants
 #define DF_FOLDER_CONTENT "D:/Git/strikers/content/"
 #define DF_FOLDER_SHADERS "D:/Git/strikers/hlsl/"
 static const char* k_content_folder = DF_FOLDER_CONTENT;
 static const char* k_shaders_folder = DF_FOLDER_SHADERS;
+static constexpr uint32 k_num_runners_per_team = 4;
+static constexpr uint32 k_num_keepers_per_team = 1;
 
-// common types
-using int32 = int;
-using f32	= float;
-using uint8 = unsigned char;
-using uint32 = uint32_t;
-using uint64 = uint64_t;
+static constexpr uint32 k_num_swapchain_buffers = 3;
+
+template <typename _t>
+static constexpr _t k_invalid = (_t)-1;
+
+template <typename _t>
+static constexpr bool is_valid(const _t& val) { return val != k_invalid<_t>; }
 
 static constexpr uint32 min(const uint32 a, const uint32 b)
 {
@@ -197,19 +207,65 @@ struct box
 	{
 		return m_position + m_extents;
 	}
+
+	static bool calculate_collision(const box& a, const box& b, 
+		float3* out_intersection_depth = nullptr)
+	{
+		const float3& min_a = a.abs_min();
+		const float3& max_a = a.abs_max();
+		const float3& min_b = b.abs_min();
+		const float3& max_b = b.abs_max();
+
+		const float3 intersection_depth = {
+			glm::min(max_a.x - min_b.x, max_b.x - min_a.x),
+			glm::min(max_a.y - min_b.y, max_b.y - min_a.y),
+			glm::min(max_a.z - min_b.z, max_b.z - min_a.z)
+		};
+
+		if (out_intersection_depth) 
+			*out_intersection_depth = intersection_depth;
+
+		return {
+			intersection_depth.x > 0.0f &&
+			intersection_depth.y > 0.0f &&
+			intersection_depth.z > 0.0f
+		};
+	}
 };
 
 static mat4x4 calculate_view_mat(const mat4x4& camera_transform)
 {
 	return glm::inverse(camera_transform);
 }
-static mat4x4 calculate_proj_mat(const float fov, const float aspect, const float plane_near, const float plane_far)
+static mat4x4 calculate_perspective_proj_mat(
+	const float fov, 
+	const float aspect, 
+	const float plane_near, 
+	const float plane_far)
 {
 	return glm::perspectiveLH_ZO(
 		fov,
 		aspect,
 		plane_near,
 		plane_far);
+}
+static mat4x4 calculate_orthographic_proj_mat(
+	const float2& left_right,
+	const float2& bottom_top,
+	const float2& near_far)
+{
+	return glm::orthoLH_ZO(
+		left_right.x,
+		left_right.y,
+		bottom_top.x,
+		bottom_top.y,
+		near_far.x,
+		near_far.y);
+}
+
+static rotation make_look_rotation(const float3& forward, const float3& up = {0,1,0})
+{
+	return glm::quatLookAtLH(glm::normalize(forward), up);
 }
 static mat4x4 calculate_transform(const float3& position, const float3& lookAt, const float3& up = { 0,1,0 })
 {
@@ -232,6 +288,12 @@ inline static _t clamp_length(const _t& v, float max_length)
 	}
 	return v;
 }
+
+enum class space
+{
+	world,
+	local
+};
 
 struct transform final
 {
@@ -464,7 +526,7 @@ template <typename _ex = int32, typename _unex = const char*>
 class result final
 {
 	#define DF_CHECK_ON_CLAIM 1
-	#define DF_CHECK_ON_MAKE 0
+	#define DF_CHECK_ON_MAKE 1
 	#define DF_RESULT_CHECK								\
     do {												\
         if (m_flags == error) {							\

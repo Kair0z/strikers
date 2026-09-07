@@ -240,6 +240,11 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
                 
             }
 
+            aiColor4D ai_out_color{};
+            aiGetMaterialColor(material, AI_MATKEY_BASE_COLOR, &ai_out_color);
+            aiGetMaterialColor(material, AI_MATKEY_COLOR_DIFFUSE, &ai_out_color);
+            asset.m_basecolor = float4(ai_out_color.r, ai_out_color.g, ai_out_color.b, ai_out_color.a);
+
             if (strstr(name.c_str(), "kritter"))
             {
                 static int a = 0;

@@ -17,9 +17,13 @@ public:
 	static constexpr node_idx k_invalid = 0u;
 	static constexpr node_idx k_root = 1u;
 
-	flatgraph()
+	flatgraph() { clear(); }
+
+	void clear()
 	{
-		m_nodes.reserve(256u);
+		const uint64 prev_size = m_nodes.size();
+		m_nodes.clear();
+		m_nodes.reserve(prev_size);
 		node_idx invalid = allocate_node(); // k_invalid
 		node_idx root = allocate_node(); // k_root
 	}

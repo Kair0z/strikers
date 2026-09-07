@@ -53,6 +53,8 @@ struct comp_physics final : public detail::component_t<component::type::physics>
 	float m_gravity = -9.81f;
 	float m_drag_multiplier = 1; // per-body 'drag coefficient'
 	
+	float3 m_deltapos_candidate;
+	
 	void reset()
 	{
 		m_velocity = {};
@@ -64,6 +66,8 @@ struct comp_bounds final : public detail::component_t<component::type::bounds>
 {
 	box m_box;
 	sphere m_sphere;
+	box m_world_aabb;
+	bool m_world_aabb_dirty = true;
 };
 
 struct comp_render final : public detail::component_t<component::type::render>
