@@ -108,7 +108,7 @@ void commandman::command_script(const stringview& filepath)
 
 void commandman::tick()
 {
-    command_script("D:/Git/strikers/commands.md");
+    command_script(DF_COMMANDS_SCRIPT);
     for (auto& cmd : m_commands)
     {
         cmd.second->tick();

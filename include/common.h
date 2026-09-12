@@ -56,8 +56,11 @@ using uint32 = uint32_t;
 using uint64 = uint64_t;
 
 // constants
-#define DF_FOLDER_CONTENT "D:/Git/strikers/content/"
-#define DF_FOLDER_SHADERS "D:/Git/strikers/hlsl/"
+#define DF_FOLDER_CONTENT	"D:/Git/strikers/content/"
+#define DF_FOLDER_SHADERS	"D:/Git/strikers/hlsl/"
+#define DF_COMMANDS_SCRIPT	"D:/Git/strikers/commands.md"
+#define DF_SETUP_SCRIPT		"D:/Git/strikers/setup.md"
+
 static const char* k_content_folder = DF_FOLDER_CONTENT;
 static const char* k_shaders_folder = DF_FOLDER_SHADERS;
 static constexpr uint32 k_num_runners_per_team = 4;
@@ -119,6 +122,12 @@ inline string normalize_path(const stringview& filepath)
 	return to_lowercase(p.generic_string());
 }
 
+template<typename... _args>
+static string format(const stringview& fmt, _args&&... args)
+{
+	return std::vformat(fmt, std::make_format_args(args...));
+}
+
 template <typename _t>
 _t snap_if_tiny(const _t& value)
 {
@@ -135,6 +144,8 @@ inline float random_flt(const float min, const float max)
 
 template <typename _t>
 using option = std::optional<_t>;
+template <typename _t0, typename _t1>
+using pair = std::pair<_t0, _t1>;
 
 using mat4x4 = glm::mat4;
 using uint2 = glm::uvec2;
@@ -159,6 +170,7 @@ namespace colors
 	static constexpr color green() { return float4(0, 1, 0, 1); }
 	static constexpr color blue() { return float4(0, 0, 1, 1); }
 	static constexpr color white() { return float4(1, 1, 1, 1); }
+	static constexpr color purple() { return float4(0.5f, 0.5f, 1.0f, 1.0f); }
 }
 
 struct sphere
@@ -180,36 +192,48 @@ struct sphere
 struct box
 {
 	float3 m_position;
-	float3 m_extents;
+	float3 m_min;
+	float3 m_max;
 
 	box() = default;
 
-	static box unit()
+	static box unit(float scale = 1.0f)
 	{
 		static box unitbox{};
-		unitbox.m_extents = float3(1,1,1) * 0.5f;
+		unitbox.m_min = -float3(1,1,1) * 0.5f * scale;
+		unitbox.m_max = float3(1, 1, 1) * 0.5f * scale;
 		unitbox.m_position = { 0,0,0 };
+		return unitbox;
 	}
 
 	void grow_to_fit(const float3 point)
 	{
 		const float3 rel_point = point - m_position;
-		m_extents.x = glm::max(m_extents.x, rel_point.x);
-		m_extents.y = glm::max(m_extents.y, rel_point.y);
-		m_extents.z = glm::max(m_extents.z, rel_point.z);
+		m_min.x = glm::min(m_min.x, rel_point.x);
+		m_min.y = glm::min(m_min.y, rel_point.y);
+		m_min.z = glm::min(m_min.z, rel_point.z);
+		m_max.x = glm::max(m_max.x, rel_point.x);
+		m_max.y = glm::max(m_max.y, rel_point.y);
+		m_max.z = glm::max(m_max.z, rel_point.z);
 	}
 
 	float3 abs_min() const
 	{
-		return m_position - m_extents;
+		return m_position + m_min;
 	}
 	float3 abs_max() const
 	{
-		return m_position + m_extents;
+		return m_position + m_max;
 	}
+};
 
-	static bool calculate_collision(const box& a, const box& b, 
-		float3* out_intersection_depth = nullptr)
+struct collision final
+{
+	bool m_collided;
+	float3 m_intersection_depth;
+	float3 m_collision_normal;
+
+	static bool calculate(const box& a, const box& b, collision* out_collision_info)
 	{
 		const float3& min_a = a.abs_min();
 		const float3& max_a = a.abs_max();
@@ -222,14 +246,24 @@ struct box
 			glm::min(max_a.z - min_b.z, max_b.z - min_a.z)
 		};
 
-		if (out_intersection_depth) 
-			*out_intersection_depth = intersection_depth;
-
-		return {
-			intersection_depth.x > 0.0f &&
+		const bool collided = intersection_depth.x > 0.0f &&
 			intersection_depth.y > 0.0f &&
-			intersection_depth.z > 0.0f
-		};
+			intersection_depth.z > 0.0f;
+
+		if (out_collision_info)
+		{
+			const float3 center_delta = (min_a + max_a) - (min_b + max_b);
+
+			(*out_collision_info).m_collided = collided;
+			(*out_collision_info).m_intersection_depth = intersection_depth;
+			(*out_collision_info).m_collision_normal = float3(
+				intersection_depth.x <= intersection_depth.y && intersection_depth.x <= intersection_depth.z ? glm::sign(center_delta.x) : 0.0f,
+				intersection_depth.y <= intersection_depth.x && intersection_depth.y <= intersection_depth.z ? glm::sign(center_delta.y) : 0.0f,
+				intersection_depth.z <= intersection_depth.x && intersection_depth.z <= intersection_depth.y ? glm::sign(center_delta.z) : 0.0f
+			);
+		}
+
+		return collided;
 	}
 };
 
@@ -439,11 +473,11 @@ public:
 template <typename _t> using vector = std::vector<_t>;
 template <typename _k, typename _t, typename _h = std::hash<_k>, typename _eq = std::equal_to<_k>> 
 using umap = std::unordered_map<_k, _t, _h, _eq>;
-
 template <typename _fn>
 using func = std::function<_fn>;
+template <typename _t> 
+using uset = std::unordered_set<_t>;
 
-template <typename _k, typename _t> using uset = std::unordered_set<_k, _t>;
 using id = uint64;
 using scene_id = uint64;
 using mesh_id = uint64;
@@ -514,6 +548,14 @@ public:
 		}
 	}
 };
+
+#define on_cooldown(condition, delta, cd) \
+	{ \
+	static float s_timer = 0.0f; \
+	s_timer -= delta;\
+	bool is_tick = s_timer < 0; \
+	if (is_tick && condition) s_timer = cd; \
+	if (is_tick && condition)\
 
 #define log_with_cooldown(delta, cd, mssg, ...) \
 	{ \

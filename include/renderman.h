@@ -120,8 +120,9 @@ public:
 	} m_camera;
 	struct {
 		float4x4 m_mat_to_lightspace;
+		transform m_transform;
 		float4 m_color;
-		float4 m_direction;
+		box m_frustrum;
 	} m_light;
 	
 	struct batch_key
@@ -376,7 +377,7 @@ struct descriptor_heap final
 			16,
 			32, // resource
 			16,
-			16,
+			32, // gpu_resource
 			16
 		};
 		return c_capacities[slt];	
@@ -610,6 +611,11 @@ struct gpu_resource
 	}
 
 	bool is_valid() const { return m_resource != nullptr; }
+
+	bool buffer_needs_realloc(const uint64 req_bytesize) const
+	{
+		return !is_valid() || m_resource->GetDesc().Width < req_bytesize;
+	}
 
 	bool get_dxdesc(D3D12_RESOURCE_DESC& out_desc)
 	{

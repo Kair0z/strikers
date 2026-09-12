@@ -35,7 +35,7 @@ float4 main_vs(
 {
     float4 out_position;
     instance instance = t_instances[instance_id + start_instance_id];
-    out_position = mul(instance.transform, float4(vertex.position, 1));
-    out_position = mul(k_viewprojection, float4(out_position.xyz, 1));
+    out_position = mul(instance.transform, float4(vertex.position, 1)); // now ws (worldspace)
+    out_position = mul(k_viewprojection, float4(out_position.xyz, 1)); // now ls (lightspace)
     return out_position;
 }

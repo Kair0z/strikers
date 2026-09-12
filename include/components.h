@@ -23,7 +23,7 @@ struct component
 
 	static const uint32 k_num_types = static_cast<uint32>(type::num);
 	actor_id m_owner;
-	comp_id m_id;
+	comp_id m_id; // index in the component array
 
 	bool has_owner() const
 	{
@@ -49,24 +49,25 @@ struct comp_physics final : public detail::component_t<component::type::physics>
 {
 	float3 m_acceleration;
 	float3 m_velocity;
+	float3 m_delta_position;
+	bool m_is_trigger = false;
+	float m_inv_mass;
 	float m_maxspeed = -1.0f; // no max
 	float m_gravity = -9.81f;
 	float m_drag_multiplier = 1; // per-body 'drag coefficient'
-	
-	float3 m_deltapos_candidate;
-	
-	void reset()
-	{
-		m_velocity = {};
-		m_acceleration = {};
-	}
+
+	comp_physics& set_trigger(bool trigger) { m_is_trigger = trigger; return *this; }
+	comp_physics& set_static() { m_inv_mass = 0.0f; return *this; }
+	comp_physics& set_mass(float mass) { m_inv_mass = 1.0f / mass; return *this; }
+	bool is_static() const { return m_inv_mass <= 0.0f; }
+	void reset() { m_velocity = {}; m_acceleration = {}; }
 };
 
 struct comp_bounds final : public detail::component_t<component::type::bounds>
 {
 	box m_box;
-	sphere m_sphere;
 	box m_world_aabb;
+	sphere m_sphere;
 	bool m_world_aabb_dirty = true;
 };
 

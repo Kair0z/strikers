@@ -94,7 +94,6 @@ static void release_if_valid(IUnknown* anything)
 		anything->Release();
 	}
 }
-
 static void release_if_valid(gpu_resource& resource)
 {
 	release_if_valid(resource.m_resource);
@@ -939,13 +938,15 @@ void renderman::render(renderscene& scene, const contentman& cman)
 		// cbuffer: light view (shadows)
 		m_cbuffers.write_data(cbuffer::view, view::light, [&scene](void* dest) {
 			gpu_cbuffer_view* dest_view = reinterpret_cast<gpu_cbuffer_view*>(dest);
-			const auto light_transform = transform::build({ 0,0,0 }, make_look_rotation(scene.m_light.m_direction), { 1,1,1 });
-			const auto mat_view = calculate_view_mat(light_transform.m_matrix);
+			const auto mat_view = calculate_view_mat(scene.m_light.m_transform.m_matrix);
 			const float orthographic_size = 10.0f;
+			const auto& frustrum = scene.m_light.m_frustrum;
+			const auto& frustrum_min = frustrum.abs_min();
+			const auto& frustrum_max = frustrum.abs_max();
 			const auto mat_proj = calculate_orthographic_proj_mat(
-				{ -orthographic_size, orthographic_size },
-				{ -orthographic_size, orthographic_size },
-				{ -orthographic_size, orthographic_size });
+				{ frustrum_min.x, frustrum_max.x },
+				{ frustrum_min.y, frustrum_max.y },
+				{ frustrum_min.z, frustrum_max.z});
 			dest_view->m_viewprojection = mat_proj * mat_view;
 			scene.m_light.m_mat_to_lightspace = dest_view->m_viewprojection;
 		});
@@ -955,7 +956,7 @@ void renderman::render(renderscene& scene, const contentman& cman)
 		{
 			gpu_cbuffer_global* global = reinterpret_cast<gpu_cbuffer_global*>(dest);
 			global->m_light_color = scene.m_light.m_color;
-			global->m_light_direction = scene.m_light.m_direction;
+			global->m_light_direction = float4(scene.m_light.m_transform.get_forward(), 1);
 			global->m_mat_to_lightspace = scene.m_light.m_mat_to_lightspace;
 		
 			push_gpu_resource_descriptor(*m_device, m_shadows.m_srv, global->m_texid_shadows);
@@ -1273,7 +1274,7 @@ void renderman::process_scene(renderscene& scene, const contentman& cman)
 	{
 		const uint32 num_lines = (uint32)scene.m_line_instances.size();
 		const uint64 bytesize = sizeof(gpu_line_instance) * num_lines;
-		if (!m_instancebuffer_lines.is_valid() || m_instancebuffer_lines.m_resource->GetDesc().Width < bytesize)
+		if (m_instancebuffer_lines.buffer_needs_realloc(bytesize))
 		{
 			release_if_valid(m_instancebuffer_lines);
 			m_instancebuffer_lines = gpu_resource::allocate(*m_device, gpu_resource::builder()
@@ -1378,8 +1379,7 @@ void renderman::reallocate_skeleton_buffers(const contentman& cman, skel_id id)
 			.heap_type(D3D12_HEAP_TYPE_UPLOAD)).claim();
 
 		// map the upload resource
-		map_resource<gpu_bone>(buffers.m_bone_buffer_staging, [num_bones, &skeleton_asset](gpu_bone* dest)
-		{
+		map_resource<gpu_bone>(buffers.m_bone_buffer_staging, [num_bones, &skeleton_asset](gpu_bone* dest) {
 			for (uint32 i = 0u; i < num_bones; ++i)
 			{
 				dest[i].m_matrix = skeleton_asset->m_bones[i].m_offset_matrix;

@@ -32,6 +32,11 @@ public:
 		return (_t)std::stof(m_value);
 	}
 
+	bool enabled() const
+	{
+		return get_value<float>() > 0.0f;
+	}
+
 private:
 	friend class commandman;
 	string m_name;

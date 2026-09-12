@@ -1,134 +1,98 @@
+#pragma once
 #include "common.h"
 #include "components.h"
 #include "flatgraph.h"
 #include "transman.h"
-
-#define on_cooldown(condition, delta, cd) \
-	{ \
-	static float s_timer = 0.0f; \
-	s_timer -= delta;\
-	bool is_tick = s_timer < 0; \
-	if (is_tick && condition) s_timer = cd; \
-	if (is_tick && condition)\
+#include "collisionman.h"
 
 namespace strikers {
 class renderscene;
 class contentman;
 
-class colman final
-{
-public:
-	struct collider_entry
-	{
-		box m_aabb;
-		vector<uint32> m_collisions{};
-	};
-	struct collision_info
-	{
-		uint32 m_collider_y;
-		uint32 m_collider_x;
-		float3 m_overlap{};
-	};
-
-	void write_aabb(const uint32 slot, const box& aabb)
-	{
-		// resize if necessary
-		const uint32 new_size = slot + 1;
-		m_collisions.reserve(new_size * new_size);
-		if (m_colliders.size() <= new_size) 
-			m_colliders.resize(new_size);
-		
-		m_colliders[slot].m_aabb = aabb;
-	}
-
-	void calculate_collisions()
-	{
-		for (uint32 x = 0u; x < m_colliders.size(); ++x)
-			m_colliders[x].m_collisions.clear();
-
-		m_collisions.clear();
-		for (uint32 y = 0u; y < m_colliders.size(); ++y)
-		{
-			for (uint32 x = 0u; x < m_colliders.size(); ++x)
-			{
-				// only test half of the matrix
-				if (x <= y) continue;
-
-				float3 collision_overlap{};
-				const bool is_collision = box::calculate_collision(m_colliders[x].m_aabb, m_colliders[y].m_aabb, &collision_overlap);
-				if (is_collision)
-				{
-					m_collisions.push_back({});
-					const uint32 collision_index = (uint32)m_collisions.size() - 1;
-					collision_info& collision = m_collisions[collision_index];
-					collision.m_collider_y = y;
-					collision.m_collider_x = x;
-					collision.m_overlap = collision_overlap;
-					m_colliders[y].m_collisions.push_back(collision_index);
-					m_colliders[x].m_collisions.push_back(collision_index);
-				}
-			}
-		}
-	}
-
-	uint32 num_collisions() const
-	{
-		return (uint32)m_collisions.size();
-	}
-
-	uint32 num_collisions(const uint32 slot) const
-	{
-		return (uint32)m_colliders[slot].m_collisions.size();
-	}
-
-	const collision_info& get_collision_at_index(const uint32 slot, uint32 index)
-	{
-		return m_collisions[m_colliders[slot].m_collisions[index]];
-	}
-
-	bool test_collision(const box& aabb, const float3 delta_position, float3& out_) const
-	{
-		for (uint32 x = 0u; x < m_colliders.size(); ++x)
-		{
-			if (box::calculate_collision(aabb, m_colliders[x].m_aabb))
-				return true;
-		}
-		return false;
-	}
-	
-private:
-	vector<collider_entry> m_colliders{};
-	vector<collision_info> m_collisions{};
-};
-
 class gameman final
 {
-	// per team data
-	struct team
+	// each game can host up to 2 players
+	struct player final
 	{
+		
 	};
 
-	// per player data
-	struct player_data final
+	// per character info
+	struct character final
 	{
-		uint32 m_current_local_runner;
-	};
-	
-	// any 'runner' pawn that runs on the pitch
-	struct runner final
-	{
-		enum flags
+		enum type
 		{
-			none = 0,
-			kritter = (1 << 0),
-			toad = (1 << 1),
-			ball = (1 << 2),
-			mario = (1 << 3),
-			luigi = (1 << 4)
+			toad,
+			mario,
+			luigi,
+			yoshi,
+			num
 		};
 
+		static const char* get_name(uint32 tpe)
+		{
+			static const char* k_names[]
+			{
+				"toad",
+				"mario",
+				"luigi",
+				"yoshi"
+			};
+			return k_names[tpe];
+		}
+	};
+
+	// any character that runs on the pitch (not including goalies)
+	struct runner final
+	{
+		enum slot
+		{
+			cb,
+			lw,
+			rw,
+			captain,
+			num
+		};
+
+		static const char* get_name(uint32 slt)
+		{
+			static const char* k_names[]
+			{
+				"cb",
+				"lw",
+				"rw",
+				"cap"
+			};
+			return k_names[slt];
+		}
+
+		character::type m_character;
+		bool m_active = true;
 		actor_id m_actor = k_actor_invalid;
-		uint32 m_flags = 0u;
+		transform m_start_transform;
+	};
+
+	// each game always has 2 teams (football)
+	struct team final
+	{
+		enum slot
+		{
+			left,
+			right,
+			num
+		};
+
+		static const char* get_name(uint32 slt)
+		{
+			static const char* k_names[]
+			{
+				"team_left",
+				"team_right"
+			};
+			return k_names[slt];
+		}
+
+		uint32 m_current_local_runner;
 	};
 
 	// the ball state
@@ -161,80 +125,60 @@ class gameman final
 		float m_charge = 0.0f;
 	};
 
-	player_data m_players[2];
-	team m_teams[2];
-	runner m_runners[k_num_runners_per_team * 2];
+	player m_players[2];
+	team m_teams[team::num];
+	runner m_runners[team::num * runner::num];
 	ball m_ball;
 
-	runner& get_runner(uint32 team_idx, uint32 local_idx) { return m_runners[get_runner_idx(team_idx, local_idx)]; }
-	runner& get_runner(uint32 index) { return m_runners[index]; }
-	uint32 get_runner_team_idx(uint32 runner_idx) const { return runner_idx / k_num_runners_per_team; }
-	uint32 get_runner_local_idx(uint32 runner_idx) const { return runner_idx % k_num_runners_per_team; }
-	uint32 get_runner_idx(const uint32 team_idx, uint32 local_idx) { return (k_num_runners_per_team * team_idx) + local_idx; }
-	void set_runner_active(const uint32 team_idx, uint32 local_idx)
+	uint32 get_global_runner_idx(uint32 team_slot, uint32 runner_slot) { return (team_slot * runner::num) + runner_slot; }
+	runner& get_runner_in_global(uint32 global_idx) { return m_runners[global_idx]; }
+	runner& get_runner_in_team(uint32 team_idx, uint32 local_idx) { return get_runner_in_global(get_global_runner_idx(team_idx, local_idx)); }
+	
+private:
+	struct camera
 	{
-		m_players[team_idx].m_current_local_runner = local_idx;
-	}
-	void set_runner_active(const uint32 index)
-	{
-		const uint32 team = get_runner_team_idx(index);
-		const uint32 local = get_runner_local_idx(index);
-		set_runner_active(team, local);
-	}
-
-	void ball_start_dribble(const uint32 runner_idx)
-	{
-		m_ball.m_dribble.m_runner_dribble = runner_idx;
-		m_ball.m_state = ball::state::dribbled;
-		set_runner_active(runner_idx);
-	}
-	void ball_pass(const uint32 runner_source, const uint32 runner_dest)
-	{
-		m_ball.m_pass.m_runner_dest = runner_dest;
-		m_ball.m_pass.m_runner_source = runner_source;
-		m_ball.m_state = ball::state::passing;
-	}
-	bool ball_held_by_runner(const uint32 rnn) const
-	{
-		if (m_ball.m_state != ball::dribbled) return false;
-		return m_ball.m_dribble.m_runner_dribble == rnn;
-	}
-
-	// any actor that has a transform in the scene
-	struct actor final
-	{
-		actor_id m_id;
-		trans_id m_transform_id;
-		uint64 m_component_idxs[component::k_num_types]{ k_component_invalid };
-		bool m_is_static = false;
-
-		actor()
-		{
-			for (uint32 i = 0u; i < component::k_num_types; ++i)
-				m_component_idxs[i] = k_component_invalid;
-		}
-
-		void mark_component(component::type type, uint32 component_idx)
-		{
-			m_component_idxs[(uint32)type] = component_idx;
-		}
-		void unmark_component(component::type type)
-		{
-			mark_component(type, k_component_invalid);
-		}
-		bool has_component(component::type type) const
-		{
-			return m_component_idxs[(int)type] != k_component_invalid;
-		}
+		camera_id m_asset_id;
+		transform m_transform;
+		transform m_transform_original;
+		float3 m_velocity;
 	};
+	camera m_camera;
 
-	void actor_set_static(actor_id id, bool is_static)
+	struct light
 	{
-		m_actors[id].m_is_static = is_static;
-	}
-	bool actor_is_static(actor_id id) const { return m_actors[id].m_is_static; }
+		transform m_transform;
+		float4 m_color;
+	};
+	light m_light;
+
+public:
+	void start(const contentman& cman);
+
+	struct tick_context
+	{
+		float seconds;
+		float delta_seconds;
+	};
+	void tick(const tick_context& ctx);
+	void tick_game(const tick_context& ctx);
+	void tick_systems(const tick_context& ctx);
+	void build_renderscene(const contentman& cman, renderscene& scene);
 
 private:
+	void assemble_fbx_scene(const contentman& cman, const stringview& filepath);
+
+	struct reset
+	{
+		enum flags
+		{
+			none = 0,
+			camera = 1 << 0,
+			game = 1 << 1,
+			all = game | camera
+		};
+	};
+	void reset(reset::flags flags);
+
 	template <component::type _t>
 	using component_array = vector<component_t<_t>>;
 	struct
@@ -246,7 +190,6 @@ private:
 		component_array<component::type::movement> m_movements;
 		component_array<component::type::brain> m_brains;
 	} m_components;
-
 	template <component::type _t>
 	component_array<_t>& components()
 	{
@@ -268,61 +211,15 @@ private:
 		else if constexpr (_t == component::type::brain) return m_components.m_brains;
 	}
 
-	struct camera
-	{
-		camera_id m_asset_id;
-		transform m_transform;
-		transform m_transform_original;
-		float3 m_velocity;
-	};
-	camera m_camera;
+	transman m_transman;
+	collisionman m_collisionman;
+	umap<string, actor_id> m_name_to_actor{};
 
-	vector<actor> m_actors;
-
-	template <component::type _t>
-	component_t<_t>& add_component(actor_id owner)
-	{
-		if (has_component(owner, _t))
-		{
-			return *get_component<_t>(owner);
-		}
-
-		// first find an inactive entry: reparent
-		auto& comp_array = components<_t>();
-		for (uint32 i = 0u; i < comp_array.size(); ++i)
-		{
-			if (comp_array[i].has_owner() == false)
-			{
-				comp_array[i] = {}; // reset data
-				comp_array[i].m_owner = owner; // reparent
-				comp_array[i].m_id = i;
-				m_actors[owner].mark_component(_t, i);
-				return comp_array[i];
-			}
-		}
-		
-		// allocate a new component if no unused was found
-		comp_array.push_back({});
-		const uint32 comp_idx = (uint32)comp_array.size() - 1u;
-		auto& new_component = comp_array[comp_idx];
-		new_component.m_owner = owner;
-		new_component.m_id = comp_idx;
-		m_actors[owner].mark_component(_t, comp_idx);
-		return new_component;
-	}
-
-	template <component::type _t>
-	void rem_component(actor_id owner)
-	{
-		m_actors[owner].unmark_component(_t);
-		components<_t>().clear_owner();
-	}
-	
 	actor_id create_actor(const actor_id parent = k_actor_invalid)
 	{
 		m_actors.push_back({});
 		actor_id new_id = (actor_id)m_actors.size() - 1;
-		actor& new_actor = m_actors[new_id];
+		actor_entry& new_actor = m_actors[new_id];
 
 		// add a transform
 		if (parent == k_actor_invalid)
@@ -336,58 +233,121 @@ private:
 		return new_id;
 	}
 
-	bool has_component(actor_id owner, component::type type) const
+	struct actor_entry final
 	{
-		return m_actors[owner].has_component(type);
-	}
+		actor_id m_id;
+		trans_id m_transform_id;
+		string m_name;
+		uint64 m_component_idxs[component::k_num_types]{ k_component_invalid };
+		bool m_active;
 
-	template <component::type _t>
-	component_t<_t>* get_component(actor_id owner)
-	{
-		if (has_component(owner, _t))
+		actor_entry()
 		{
-			const auto& actor = m_actors[owner];
-			const auto comp_idx = actor.m_component_idxs[(int)_t];
-			return &components<_t>()[comp_idx];
+			for (uint32 i = 0u; i < component::k_num_types; ++i)
+				m_component_idxs[i] = k_component_invalid;
 		}
-		else return nullptr;
-	}
-
-	template <component::type _t>
-	component_t<_t> const* get_component(actor_id owner) const
-	{
-		if (has_component(owner, _t))
+		void mark_component(component::type type, uint32 component_idx)
 		{
-			const auto& actor = m_actors[owner];
-			const auto comp_idx = actor.m_component_idxs[(int)_t];
-			return &components<_t>()[comp_idx];
+			m_component_idxs[(uint32)type] = component_idx;
 		}
-		else return nullptr;
+		void unmark_component(component::type type)
+		{
+			mark_component(type, k_component_invalid);
+		}
+		bool has_component(component::type type) const
+		{
+			return m_component_idxs[(int)type] != k_component_invalid;
+		}
+	};
+	vector<actor_entry> m_actors;
+	actor_entry& get_actor(actor_id id)
+	{
+		return (id != k_actor_invalid) ? m_actors[id] : null_actor();
 	}
+	static actor_entry& null_actor()
+	{
+		static actor_entry null{};
+		return null;
+	}
+	struct actor_scope final
+	{
+		actor_id m_id{};
+		gameman& m_owner;
+		actor_scope(gameman& game, actor_id id) : m_owner{ game }, m_id { id } {}
 
-public:
-	void start(const contentman& cman);
-	void tick(float seconds, float delta_seconds);
-	void build_renderscene(const contentman& cman, renderscene& scene);
+		const string& get_name() const;
+		const bool is_active() const;
+		const trans_id get_transform_id() const;
+		const transform get_transform(space spc) const;
+		const float3 get_position(space spc) const;
+		const rotation get_rotation(space spc) const;
+		const float3 get_scale(space spc) const;
+		const actor_scope& set_name(const string& name) const;
+		const actor_scope& set_active(const bool active) const;
+		const actor_scope& set_transform(const transform& trans, space spc) const;
+		const actor_scope& set_position(const float3& position, space spc) const;
+		const actor_scope& set_rotation(const rotation& rotation, space spc) const;
+		const actor_scope& set_scale(const float3& scale, space spc) const;
+		const actor_scope& add_position(const float3& delta, space spc) const;
+		const actor_scope& add_rotation(const rotation& delta, space spc) const;
+		const actor_scope& multiply_scale(const float3& multiplier, space spc) const;
+		
+		bool has_component(component::type type) const {
+			return m_owner.get_actor(m_id).has_component(type);
+		}
 
-private:
-	void assemble_fbx_scene(const contentman& cman, const stringview& filepath);
-	void reset();
+		template <component::type _t>
+		component_t<_t>* component() const
+		{
+			if (has_component(_t))
+			{
+				const auto& actor = m_owner.get_actor(m_id);
+				const auto comp_idx = actor.m_component_idxs[(int)_t];
+				return &m_owner.components<_t>()[comp_idx];
+			}
+			else return nullptr;
+		}
 
-	transman m_transman;
-	trans_id actor_transform(actor_id id) { return m_actors[id].m_transform_id; }
-	void actor_set_transform(actor_id id, const transform& trans, space spc)	{ if (!actor_is_static(id)) m_transman.set_transform(actor_transform(id), trans, spc); }
-	void actor_set_position(actor_id id, const float3& position, space spc)		{ if (!actor_is_static(id)) m_transman.set_position(actor_transform(id), position, spc); }
-	void actor_set_rotation(actor_id id, const rotation& rotation, space spc)	{ if (!actor_is_static(id)) m_transman.set_rotation(actor_transform(id), rotation, spc); }
-	void actor_set_scale(actor_id id, const float3& scale, space spc)			{ if (!actor_is_static(id)) m_transman.set_scale(actor_transform(id), scale, spc); }
-	transform actor_get_transform(actor_id id, space spc)						{ return m_transman.get_transform(actor_transform(id), spc); }
-	float3 actor_get_position(actor_id id, space spc)							{ return m_transman.get_position(actor_transform(id), spc); }
-	rotation actor_get_rotation(actor_id id, space spc)							{ return m_transman.get_rotation(actor_transform(id), spc); }
-	float3 actor_get_scale(actor_id id, space spc)								{ return m_transman.get_scale(actor_transform(id), spc); }
-	void actor_add_position(actor_id id, const float3& delta, space spc)		{ if (!actor_is_static(id)) m_transman.add_position(actor_transform(id), delta, spc); }
-	void actor_add_rotation(actor_id id, const rotation& delta, space spc)		{ if (!actor_is_static(id)) m_transman.add_rotation(actor_transform(id), delta, spc); }
-	void actor_mult_scale(actor_id id, const float3& multiplier, space spc)		{ if (!actor_is_static(id)) m_transman.mult_scale(actor_transform(id), multiplier, spc); }
-	
-	colman m_colman;
+		template <component::type _t>
+		const actor_scope& add_component() const
+		{
+			if (has_component(_t))
+			{
+				return *this; // skip, already existing component
+			}
+
+			// first find an inactive entry: reparent
+			auto& comp_array = m_owner.components<_t>();
+			for (uint32 i = 0u; i < comp_array.size(); ++i)
+			{
+				if (comp_array[i].has_owner() == false)
+				{
+					comp_array[i] = {}; // reset data
+					comp_array[i].m_owner = m_id; // reparent
+					comp_array[i].m_id = i;
+					m_owner.get_actor(m_id).mark_component(_t, i);
+					return *this;
+				}
+			}
+
+			// allocate a new component if no unused was found
+			comp_array.push_back({});
+			const uint32 comp_idx = (uint32)comp_array.size() - 1u;
+			auto& new_component = comp_array[comp_idx];
+			new_component.m_owner = m_id;
+			new_component.m_id = comp_idx;
+			m_owner.get_actor(m_id).mark_component(_t, comp_idx);
+			return *this;
+		}
+
+		template <component::type _t>
+		void rem_component()
+		{
+			m_owner.get_actor(m_id).unmark_component(_t);
+			m_owner.components<_t>().clear_owner();
+		}
+	};
+
+	actor_scope actor(actor_id id) { return actor_scope(*this, id); }
 };
 }

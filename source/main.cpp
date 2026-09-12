@@ -53,7 +53,10 @@ int main()
         commandman::get().tick();
         wman.poll_windows();
 
-        gman.tick(time, delta_seconds);
+        gameman::tick_context tick{};
+        tick.delta_seconds = delta_seconds;
+        tick.seconds = time;
+        gman.tick(tick);
 
         renderscene scene;
         gman.build_renderscene(cman, scene);
