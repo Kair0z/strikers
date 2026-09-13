@@ -766,7 +766,7 @@ result<> renderman::initialize()
 	// allocate shadow map
 	{
 		m_shadows.m_resource = gpu_resource::allocate(*m_device, gpu_resource::builder()
-			.texture2D(1024, 1024)
+			.texture2D(4096, 4096)
 			.create_flags(D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
 			.format(DXGI_FORMAT_R32_TYPELESS)
 			.init_state(D3D12_RESOURCE_STATE_DEPTH_READ)

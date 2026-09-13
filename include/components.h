@@ -1,4 +1,5 @@
 #include "common.h"
+#include "collisionman.h"
 
 namespace strikers
 {
@@ -51,11 +52,15 @@ struct comp_physics final : public detail::component_t<component::type::physics>
 	float3 m_velocity;
 	float3 m_delta_position;
 	bool m_is_trigger = false;
+	uint32 m_collision_layer;
+	uint32 m_collision_mask = ((uint32)-1) & ~(1 << collision_layers::common_ignored);
 	float m_inv_mass;
 	float m_maxspeed = -1.0f; // no max
 	float m_gravity = -9.81f;
 	float m_drag_multiplier = 1; // per-body 'drag coefficient'
 
+	comp_physics& set_layer(uint32 layer) { m_collision_layer = layer; return *this; }
+	comp_physics& ignore_layer(uint32 layer, bool ignore) { if (!ignore) m_collision_mask |= (1 << layer); else m_collision_mask &= ~(1 << layer); return *this; }
 	comp_physics& set_trigger(bool trigger) { m_is_trigger = trigger; return *this; }
 	comp_physics& set_static() { m_inv_mass = 0.0f; return *this; }
 	comp_physics& set_mass(float mass) { m_inv_mass = 1.0f / mass; return *this; }

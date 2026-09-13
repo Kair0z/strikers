@@ -123,6 +123,7 @@ public:
 		transform m_transform;
 		float4 m_color;
 		box m_frustrum;
+		uint2 m_shadowmap_resolution;
 	} m_light;
 	
 	struct batch_key

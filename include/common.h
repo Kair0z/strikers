@@ -158,10 +158,17 @@ using float4x4 = glm::mat4;
 using rotation = glm::quat;
 using color = float4;
 
-inline float2 lerp(const float2& a, const float2& b, float t)
+inline float lerp(const float a, const float b, float t)
 {
 	t = glm::clamp(t, 0.0f, 1.0f);
-	return float2(std::lerp(a.x, b.x, t), std::lerp(a.y, b.y, t));
+	return std::lerp(a, b, t);
+}
+inline float2 lerp(const float2& a, const float2& b, float t)
+{
+	return float2(
+		lerp(a.x, b.x, t),
+		lerp(a.x, b.x, t)
+	);
 }
 
 namespace colors
@@ -264,6 +271,14 @@ struct collision final
 		}
 
 		return collided;
+	}
+	
+	collision inverted() const
+	{
+		collision result = *this;
+		result.m_collision_normal = -result.m_collision_normal;
+		result.m_intersection_depth = -result.m_intersection_depth;
+		return result;
 	}
 };
 

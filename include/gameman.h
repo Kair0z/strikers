@@ -11,12 +11,6 @@ class contentman;
 
 class gameman final
 {
-	// each game can host up to 2 players
-	struct player final
-	{
-		
-	};
-
 	// per character info
 	struct character final
 	{
@@ -81,7 +75,6 @@ class gameman final
 			right,
 			num
 		};
-
 		static const char* get_name(uint32 slt)
 		{
 			static const char* k_names[]
@@ -92,7 +85,37 @@ class gameman final
 			return k_names[slt];
 		}
 
-		uint32 m_current_local_runner;
+		actor_id m_goal_actor;
+		float m_action_cooldown_timer = 0.0f;
+
+		bool action_on_cooldown() const
+		{
+			return m_action_cooldown_timer > 0.0f;
+		}
+		void reset_cooldown()
+		{
+			m_action_cooldown_timer = 0.8f;
+		}
+	};
+
+	struct goalie final
+	{
+		actor_id m_actor;
+	};
+
+	// each game can host up to 2 players
+	struct player final
+	{
+		enum slot
+		{
+			one,
+			two,
+			num
+		};
+
+		team::slot m_team_idx;
+		bool m_active = false;
+		uint32 m_current_local_runner = (uint32)runner::captain;
 	};
 
 	// the ball state
@@ -102,7 +125,8 @@ class gameman final
 		{
 			idle,
 			keeper,
-			dribbled,
+			dribble,
+			charging,
 			passing,
 			launching,
 			num
@@ -111,29 +135,155 @@ class gameman final
 		struct {
 			uint32 m_runner_source;
 			uint32 m_runner_dest;
+			float m_init_distance;
 		} m_pass;
 		struct {
-			uint32 m_runner_dribble;
+			uint32 m_runner_idx;
 		} m_dribble;
 		struct {
 			float3 m_point_source;
 			float3 m_point_dest;
+			uint32 m_runner_source;
 		} m_launch;
-
+		struct
+		{
+			uint32 m_runner_idx;
+			float m_value;
+			float m_seconds_since_start;
+		} m_charge;
+		
 		actor_id m_actor;
 		state m_state;
-		float m_charge = 0.0f;
 	};
 
-	player m_players[2];
+	struct field final
+	{
+		actor_id m_midpoint_actor;
+	};
+
+	player m_players[player::num];
 	team m_teams[team::num];
+	goalie m_goalies[team::num];
 	runner m_runners[team::num * runner::num];
 	ball m_ball;
+	umap<actor_id, uint32> m_actor_to_runner_idx;
+	field m_field;
 
-	uint32 get_global_runner_idx(uint32 team_slot, uint32 runner_slot) { return (team_slot * runner::num) + runner_slot; }
+	uint32 get_global_runner_idx(uint32 team_slot, uint32 runner_slot) const { return (team_slot * runner::num) + runner_slot; }
+	uint32 runner_get_team_idx(uint32 runner_idx) const { return runner_idx / runner::num; }
+	uint32 runner_get_local_idx(uint32 runner_idx) const { return runner_idx % runner::num; }
 	runner& get_runner_in_global(uint32 global_idx) { return m_runners[global_idx]; }
 	runner& get_runner_in_team(uint32 team_idx, uint32 local_idx) { return get_runner_in_global(get_global_runner_idx(team_idx, local_idx)); }
 	
+	void runner_start_dribble(uint32 runner_idx)
+	{
+		m_ball.m_state = ball::state::dribble;
+		m_ball.m_dribble.m_runner_idx = runner_idx;
+
+		const uint32 team = runner_get_team_idx(runner_idx);
+		const uint32 local = runner_get_local_idx(runner_idx);
+		for (uint32 i = 0u; i < player::num; ++i)
+		{
+			if (m_players[i].m_team_idx == team)
+			{
+				m_players[i].m_current_local_runner = local;
+			}
+		}
+	}
+	void runner_shoot(uint32 runner_idx)
+	{
+		if (runner_has_ball_charge(runner_idx))
+		{
+			const runner& rnr = m_runners[runner_idx];
+
+			const uint32 enemy_team = (runner_get_team_idx(runner_idx) + 1) % team::num;
+			float3 dest_point = actor(m_teams[enemy_team].m_goal_actor).get_position();
+			dest_point.y += 1.5f;
+
+			m_ball.m_state = ball::state::launching;
+			m_ball.m_launch.m_point_source = actor(rnr.m_actor).get_position();
+			m_ball.m_launch.m_point_dest = dest_point;
+		}
+	}
+	void runner_pass(uint32 runner_idx, const uint32 dest_runner)
+	{
+		const uint32 team_idx = runner_get_team_idx(runner_idx);
+		if (runner_can_pass(runner_idx))
+		{
+			m_ball.m_state = ball::state::passing;
+			m_ball.m_pass.m_runner_source = runner_idx;
+			m_ball.m_pass.m_runner_dest = dest_runner;
+
+			const actor_id dst_actor = m_runners[dest_runner].m_actor;
+			const actor_id src_actor = m_runners[runner_idx].m_actor;
+			m_ball.m_pass.m_init_distance = glm::length(actor(dst_actor).get_position() - actor(m_ball.m_actor).get_position());
+			
+			m_teams[team_idx].reset_cooldown();
+		}
+	}
+	void runner_charge(uint32 runner_idx)
+	{
+		if (runner_can_charge(runner_idx))
+		{
+			m_ball.m_state = ball::state::charging;
+			m_ball.m_charge.m_runner_idx = runner_idx;
+			m_ball.m_charge.m_seconds_since_start = 0.0f;
+		}
+	}
+
+	bool runner_can_pass(uint32 runner_idx) const
+	{
+		const uint32 team_idx = runner_get_team_idx(runner_idx);
+		return !m_teams[team_idx].action_on_cooldown() &&
+			(runner_has_ball_dribble(runner_idx) || runner_has_ball_charge(runner_idx));
+	}
+	bool runner_can_charge(uint32 runner_idx)
+	{
+		const uint32 team_idx = runner_get_team_idx(runner_idx);
+		return runner_has_ball_dribble(runner_idx) && 
+			!m_teams[team_idx].action_on_cooldown();
+	}
+	bool runner_has_ball_dribble(uint32 runner_idx) const
+	{
+		return m_ball.m_state == ball::state::dribble && runner_idx == m_ball.m_dribble.m_runner_idx;
+	}
+	bool runner_has_ball_charge(uint32 runner_idx) const
+	{
+		return m_ball.m_state == ball::state::charging && runner_idx == m_ball.m_charge.m_runner_idx;
+	}
+	bool runner_is_pass_dest(uint32 runner_idx) const
+	{
+		return m_ball.m_state == ball::state::passing && runner_idx == m_ball.m_pass.m_runner_dest;
+	}
+	bool runner_is_on_own_half(uint32 runner_idx)
+	{
+		const uint32 team_idx = runner_get_team_idx(runner_idx);
+		return team_idx == get_team_on_position(actor(m_runners[runner_idx].m_actor).get_position());
+	}
+	bool is_runner_controlled_by_player(uint32 runner_idx) const
+	{
+		const uint32 team_idx = runner_get_team_idx(runner_idx);
+		const uint32 local_idx = runner_get_local_idx(runner_idx);
+		for (uint32 i = 0u; i < player::num; ++i)
+		{
+			if (m_players[i].m_active 
+				&& m_players[i].m_team_idx == team_idx
+				&& m_players[i].m_current_local_runner == local_idx)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+	uint32 runner_get_enemy_team(uint32 runner_idx) const
+	{
+		return (runner_get_team_idx(runner_idx) + 1) % team::num;
+	}
+	uint32 get_team_on_position(float3 position)
+	{
+		return (position.x > actor(m_field.m_midpoint_actor).get_position().x) ? 0 : 1;
+	}
+
 private:
 	struct camera
 	{
@@ -163,6 +313,24 @@ public:
 	void tick_game(const tick_context& ctx);
 	void tick_systems(const tick_context& ctx);
 	void build_renderscene(const contentman& cman, renderscene& scene);
+	void detect_collisions();
+	
+	template <typename _fn>
+	void foreach_collision(actor_id actr, _fn&& func)
+	{
+		if (auto* bounds = actor(actr).component<component::type::bounds>())
+		{
+			uint32 other_collider{};
+			for (uint32 i = 0u; i < m_collisionman.num_collisions(bounds->m_id); ++i)
+			{
+				if (m_collisionman.get_collision(bounds->m_id, i, other_collider))
+				{
+					const comp_bounds& other_bounds = components<component::type::bounds>()[other_collider];
+					func(other_bounds);
+				}
+			}
+		}
+	}
 
 private:
 	void assemble_fbx_scene(const contentman& cman, const stringview& filepath);
@@ -278,15 +446,15 @@ private:
 		const string& get_name() const;
 		const bool is_active() const;
 		const trans_id get_transform_id() const;
-		const transform get_transform(space spc) const;
-		const float3 get_position(space spc) const;
-		const rotation get_rotation(space spc) const;
-		const float3 get_scale(space spc) const;
+		const transform get_transform(space spc = space::world) const;
+		const float3 get_position(space spc = space::world) const;
+		const rotation get_rotation(space spc = space::world) const;
+		const float3 get_scale(space spc = space::world) const;
 		const actor_scope& set_name(const string& name) const;
 		const actor_scope& set_active(const bool active) const;
-		const actor_scope& set_transform(const transform& trans, space spc) const;
-		const actor_scope& set_position(const float3& position, space spc) const;
-		const actor_scope& set_rotation(const rotation& rotation, space spc) const;
+		const actor_scope& set_transform(const transform& trans, space spc = space::world) const;
+		const actor_scope& set_position(const float3& position, space spc = space::world) const;
+		const actor_scope& set_rotation(const rotation& rotation, space spc = space::world) const;
 		const actor_scope& set_scale(const float3& scale, space spc) const;
 		const actor_scope& add_position(const float3& delta, space spc) const;
 		const actor_scope& add_rotation(const rotation& delta, space spc) const;
