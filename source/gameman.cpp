@@ -4,6 +4,7 @@
 #include "inputman.h"
 #include "commandman.h"
 #include "iniman.h"
+#include "fontman.h"
 
 namespace strikers {
 
@@ -284,6 +285,7 @@ void gameman::reset(reset::flags flags)
 
 void gameman::start(const contentman& cman)
 {
+	// parse setup script
 	umap<string, string> setup_settings{};
 	if (iniman::parse(DF_SETUP_SCRIPT, setup_settings))
 	{
@@ -332,9 +334,10 @@ void gameman::start(const contentman& cman)
 		}
 	}
 	
-	m_players[player::one].m_team_idx = team::right;
+	// setup players
+	m_players[player::one].m_team_idx = team::left;
 	m_players[player::one].m_active = true;
-	m_players[player::two].m_team_idx = team::left;
+	m_players[player::two].m_team_idx = team::right;
 	m_players[player::two].m_active = false;
 }
 
@@ -815,7 +818,7 @@ void gameman::detect_collisions()
 	m_collisionman.detect_collisions();
 }
 
-void gameman::build_renderscene(const contentman& cman, renderscene& scene)
+void gameman::build_renderscene(contentman& cman, renderscene& scene)
 {
 	PIXScopedEvent(0, "build_renderscene");
 
@@ -864,9 +867,44 @@ void gameman::build_renderscene(const contentman& cman, renderscene& scene)
 			continue;
 		}
 
-		auto& mesh_instance = scene.add_mesh_instance(meshid, shader::shaded);
+		auto& mesh_instance = scene.add_mesh_instance(meshid, shader::slot::shaded);
 		mesh_instance.m_transform = transform;
 		mesh_instance.apply_material(cman, cman.get_mesh_material_id(meshid));
+
+		const skel_id skelid = mesh->m_skeleton_id;
+		vector<anim_id> compatible_animations{};
+		if (cman.find_compatible_animations(skelid, compatible_animations) && !compatible_animations.empty())
+		{
+			mesh_instance.m_animation = compatible_animations[0];
+		}
+
+		if (skelid != k_id_invalid)
+		{
+			mesh_instance.m_skeleton = skelid;
+		}
+	}
+
+	// draw quads
+	for (uint32 r = 0u; r < runner::num * team::num; ++r) 
+	{
+		if (!is_runner_controlled_by_player(r))
+			continue;
+
+		auto& quad = scene.add_quad_instance();
+
+		image_id font_image{};
+		rect font_uv_rect{};
+		if (fontman::get().parse_font(cman, DF_MAIN_FONT, '1', font_image, font_uv_rect))
+		{
+			quad.m_rect_uv = font_uv_rect;
+			quad.m_image = font_image;
+		}
+		quad.m_color = float4(1, 1, 1, 1);
+		quad.m_transform = transform::identity();
+
+		const float3 forward = quad.m_transform.get_position() - m_camera.m_transform.get_position();
+		quad.m_transform.look_twd(forward);
+		quad.m_transform.set_position(actor(m_runners[r].m_actor).get_position() + float3(0,2,0));
 	}
 
 	// draw debug lines

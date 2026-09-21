@@ -209,8 +209,34 @@ public:
 					current = next_sib(current);
 				} while (current != layer_start);
 			};
-
 			traverse_layer(first_child(start_node));
+		}
+		else if (mode == traverse_mode::depth)
+		{
+			std::function<void(node_idx)> traverse_children;
+			traverse_children = [this, &traverse_children, &func, &visited_map](node_idx root)
+			{
+				if (!is_valid(root)) 
+					return;
+
+				// 1. visit current
+				node_idx current = root;
+				if (visited_map[current] == false)
+				{
+					func(current, parent(current));
+				}
+				visited_map[current] = true;
+
+				// 2. visit child & its siblings
+				node_idx child0 = first_child(current);
+				current = child0;
+				do
+				{
+					traverse_children(current);
+					current = next_sib(current);
+				} while (current != child0 && is_valid(current));
+			};
+			traverse_children(first_child(start_node));
 		}
 	}
 

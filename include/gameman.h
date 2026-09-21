@@ -8,6 +8,7 @@
 namespace strikers {
 class renderscene;
 class contentman;
+class fontman;
 
 class gameman final
 {
@@ -312,7 +313,7 @@ public:
 	void tick(const tick_context& ctx);
 	void tick_game(const tick_context& ctx);
 	void tick_systems(const tick_context& ctx);
-	void build_renderscene(const contentman& cman, renderscene& scene);
+	void build_renderscene(contentman& cman, renderscene& scene);
 	void detect_collisions();
 	
 	template <typename _fn>

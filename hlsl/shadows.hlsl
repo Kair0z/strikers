@@ -5,13 +5,22 @@
         "ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT|"\
         "SAMPLER_HEAP_DIRECTLY_INDEXED),"\
     "CBV(b0),"\
-    "SRV(t0)"
+    "SRV(t0),"\
+    "SRV(t1)"
+
+static const int k_invalid = -1;
 
 struct instance
 {
     float4x4    transform;
     float4      color;
-    uint        tex_basecolor_idx;
+    int         bone_instance_offset;
+    int         texid_basecolor;
+};
+struct bone_instance
+{
+    uint bone_index;
+    float4x4 skin_matrix;
 };
 struct vs_input
 {
@@ -25,7 +34,8 @@ cbuffer cbuffer_view : register(b0)
 {
     float4x4 k_viewprojection;
 };
-StructuredBuffer<instance> t_instances : register(t0);
+StructuredBuffer<instance>          t_instances : register(t0);
+StructuredBuffer<bone_instance>     t_bone_instances    : register(t1);
 
 [Shader("vertex")]
 float4 main_vs(
@@ -35,7 +45,20 @@ float4 main_vs(
 {
     float4 out_position;
     instance instance = t_instances[instance_id + start_instance_id];
-    out_position = mul(instance.transform, float4(vertex.position, 1)); // now ws (worldspace)
+    
+    float4 position_os = float4(vertex.position.xyz, 1);
+    if (instance.bone_instance_offset != k_invalid)
+    {        
+        const float4 skinned_position = 
+            vertex.bone_weights.x * mul(t_bone_instances[instance.bone_instance_offset + vertex.bone_ids.x].skin_matrix, float4(position_os.xyz, 1)) +
+            vertex.bone_weights.y * mul(t_bone_instances[instance.bone_instance_offset + vertex.bone_ids.y].skin_matrix, float4(position_os.xyz, 1)) +
+            vertex.bone_weights.z * mul(t_bone_instances[instance.bone_instance_offset + vertex.bone_ids.z].skin_matrix, float4(position_os.xyz, 1)) +
+            vertex.bone_weights.w * mul(t_bone_instances[instance.bone_instance_offset + vertex.bone_ids.w].skin_matrix, float4(position_os.xyz, 1));
+        
+        position_os = skinned_position;
+    }
+
+    out_position = mul(instance.transform, float4(position_os.xyz, 1)); // now ws (worldspace)
     out_position = mul(k_viewprojection, float4(out_position.xyz, 1)); // now ls (lightspace)
     return out_position;
 }

@@ -3,52 +3,84 @@
         "CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED|"\
         "ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT|"\
         "SAMPLER_HEAP_DIRECTLY_INDEXED),"\
-    "CBV(b0),"\
     "SRV(t0),"\
-    "SRV(t1),"\
-    "UAV(u0)"
+    "UAV(u0)"\
 
-struct animation_track
+static const int k_invalid = -1;
+struct bone
 {
-    
+    int parent; // -1 is invalid
+    float4x4 transform;
+    float4x4 inverse_bind;
+};
+struct bone_instance
+{
+    uint bone_index;
+    int anim_index;
+    float anim_time; // normalized (not seconds)
+    float4x4 skinned_matrix;
 };
 struct keyframe
 {
-    
+    float4 rotation; // quaternion
+    float3 position;
+    float3 scale;
 };
-struct instance
+struct animation
 {
-    uint first_bone_index;
-};
-struct bone
-{
-    float4x4 inverse_bind;
-    int parent;
+    uint first_keyframe;
+    uint num_keyframes;
 };
 
-cbuffer constants : register(b0)
-{
-    uint num_bones;
-    uint num_instances;
-};
-StructuredBuffer<instance>      t_instances  : register(t0);
-StructuredBuffer<bone>          t_bones      : register(t1);
-RWStructuredBuffer<float4x4>    u_skinned_matrices : register(u0);
+StructuredBuffer<bone> t_bones : register(t0);
+StructuredBuffer<animation> t_animations : register(t1);
+StructuredBuffer<keyframe> t_keyframes : register(t2);
+RWStructuredBuffer<bone_instance> u_bone_instances : register(u0);
 
-[Shader("compute")]
+float4x4 get_bone_local_transform(uint bone_instance_idx)
+{
+    const uint bone_index = u_bone_instances[bone_instance_idx].bone_index;
+    const uint anim_index = u_bone_instances[bone_instance_idx].anim_index;
+    if (anim_index != k_invalid)
+    {
+        return t_bones[bone_index].transform;
+    }
+    else 
+    {
+        const float4x4 base_transform = t_bones[bone_index].transform;
+        const uint first_keyframe = t_animations[anim_index].first_keyframe;
+        const uint num_keyframes = t_animations[anim_index].num_keyframes;
+        const float time = u_bone_instances[bone_instance_idx].anim_time;
+
+        const uint current_keyframe_idx = round(lerp(first_keyframe, num_keyframes - 1, time));
+        const keyframe current_keyframe = t_keyframes[current_keyframe_idx];
+        return base_transform;
+    }
+}
+
+[Shader("compute")] 
 [numthreads(64, 1, 1)]
 void main_cs(uint3 tid : SV_DispatchThreadID)
 {
-    const uint instance_idx = tid.x;
-    if (instance_idx >= num_instances)
-        return;
+    uint bone_instance_idx = tid.x;
     
-    for (uint b = 0; b < num_bones; ++b)
+    // resolve bone matrix graph
+    float4x4 resolved_transform = get_bone_local_transform(bone_instance_idx);
+    
+    // bone instance -> bone
+    const uint bone_index = u_bone_instances[bone_instance_idx].bone_index;
+    int parent_bone_index = t_bones[bone_index].parent;
+
+    while (parent_bone_index != k_invalid)
     {
-        instance inst = t_instances[instance_idx];
-        uint first_bone = inst.first_bone_index;
-        
-        float4x4 skinned_result = (float4x4)0;
-        u_skinned_matrices[first_bone + b] = skinned_result;
+        // here we can figure out the parent_instance index: (get_bone_local_transform() needs it)
+        const uint parent_delta = bone_index - parent_bone_index; 
+        const uint parent_instance_index = bone_instance_idx - parent_delta;
+
+        resolved_transform = mul(get_bone_local_transform(parent_instance_index), resolved_transform);
+        parent_bone_index = t_bones[parent_bone_index].parent;
     }
+
+    // output resolved matrix
+    u_bone_instances[bone_instance_idx].skinned_matrix = mul(resolved_transform, t_bones[bone_index].inverse_bind);
 }

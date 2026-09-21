@@ -26,6 +26,7 @@ int main()
     // cman.scan_assets_in_folder(k_content_folder);
     cman.load_fbx(string(k_content_folder) + "scene.fbx").claim();
     cman.load_fbx(string(k_content_folder) + "meshes/box.fbx").claim();
+    cman.load_png(DF_MAIN_FONT).claim();
 
     // initialize the renderer
     renderman rman{};

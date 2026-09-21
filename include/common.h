@@ -60,6 +60,7 @@ using uint64 = uint64_t;
 #define DF_FOLDER_SHADERS	"D:/Git/strikers/hlsl/"
 #define DF_COMMANDS_SCRIPT	"D:/Git/strikers/commands.md"
 #define DF_SETUP_SCRIPT		"D:/Git/strikers/setup.md"
+#define DF_MAIN_FONT		DF_FOLDER_CONTENT "textures/strikers_font.png"
 
 static const char* k_content_folder = DF_FOLDER_CONTENT;
 static const char* k_shaders_folder = DF_FOLDER_SHADERS;
@@ -195,6 +196,10 @@ struct sphere
 
 	float radius() const { return m_position_radius.w; }
 	float3 position() const { return float3(m_position_radius.x, m_position_radius.y, m_position_radius.z); }
+};
+struct rect
+{
+	float4 m_min_max;
 };
 struct box
 {
@@ -405,7 +410,7 @@ public:
 	}
 	void look_twd(const float3& forward)
 	{
-		look_at(get_position() + forward);
+		look_at(get_position() + glm::normalize(forward));
 	}
 	void set_scale(const float uniform)
 	{
@@ -583,7 +588,7 @@ template <typename _ex = int32, typename _unex = const char*>
 class result final
 {
 	#define DF_CHECK_ON_CLAIM 1
-	#define DF_CHECK_ON_MAKE 1
+	#define DF_CHECK_ON_MAKE 0
 	#define DF_RESULT_CHECK								\
     do {												\
         if (m_flags == error) {							\

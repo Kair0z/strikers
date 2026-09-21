@@ -95,8 +95,6 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             aiProcess_SortByPType;
         const aiScene* scene = assimp.ReadFile(string(filepath), flags);
 
-        // parse fbx scene asset
-
         // list all camera-names that want to know their scene_transform (this is necessary because assimp is crazy)
         umap<string, float4x4*> camera_name_to_node_scene_transform{};
         vector<camera_id> camera_ids{};
@@ -156,7 +154,7 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             allocate_asset<asset_type::scene>(sc_id, sc_asset, root_id);
         }
 
-#if 0 // log scene graph
+#if 1 // log scene graph
         sc_asset.m_graph.traverse([&sc_asset](uint32 c, uint32 p)
         {
             const auto& node = sc_asset.m_graph.get(c);
@@ -166,7 +164,7 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             for (uint32 i = 0u; i < node.get_depth(); ++i)
                 message = "  " + message;
             logman::log(message, data.m_meshes.size());
-        });
+        }, sc_asset.m_graph.k_root, scene_asset::nodegraph::traverse_mode::depth);
 #endif
 
         // parse cameras
@@ -226,7 +224,6 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             }
             else return false;
         };
-
         vector<mat_id> material_ids{};
         for (uint32 i = 0u; i < scene->mNumMaterials; ++i)
         {
@@ -259,6 +256,8 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
         }
 
         // parse fbx meshes
+        umap<aiNode*, skel_id> first_bone_node_to_skeleton_id{};
+        umap<string, skel_id> node_name_to_skeleton_id{};
         for (uint32 i = 0u; i < scene->mNumMeshes; ++i)
         {
             const auto& mesh = scene->mMeshes[i];
@@ -272,13 +271,11 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             asset_data.m_vertices.resize(num_vertices);
 
             float3 average_position = {};
-
             for (uint32 v = 0; v < num_vertices; ++v)
             {
                 memcpy(&asset_data.m_vertices[v].m_position, &mesh->mVertices[v], sizeof(float3));
                 memcpy(&asset_data.m_vertices[v].m_normal, &mesh->mNormals[v], sizeof(float3));
                 memcpy(&asset_data.m_vertices[v].m_uv, &mesh->mTextureCoords[0][v], sizeof(float2));
-
                 average_position += asset_data.m_vertices[v].m_position;
             }
             for (uint32 f = 0; f < mesh->mNumFaces; ++f)
@@ -290,19 +287,64 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
                     memcpy(&asset_data.m_indices.back(), &face.mIndices[idx], sizeof(uint32));
                 }
             }
-            for (uint32 b = 0u; b < num_bones; ++b)
-            {
-                const aiBone* bone = mesh->mBones[b];
-                for (uint32 w = 0u; w < bone->mNumWeights; ++w)
-                {
-                    const aiVertexWeight& weight = bone->mWeights[w];
-                    mesh_asset::vertex& vertex = asset_data.m_vertices[weight.mVertexId];
 
-                    // bind the bone to the vertex with a weight
-                    vertex.m_bone_indices[vertex.m_num_active_bones] = b;
-                    vertex.m_bone_weights[vertex.m_num_active_bones] = weight.mWeight;
-                    vertex.m_num_active_bones++;
+            // parse skeleton if this mesh has bones
+            if (num_bones > 0)
+            {
+                // create standalone skeleton asset:
+                const auto first_bone_node = mesh->mBones[0]->mNode;
+                const bool skeleton_already_created = first_bone_node_to_skeleton_id.contains(first_bone_node);
+
+                const skel_id skeleton_id = skeleton_already_created ? first_bone_node_to_skeleton_id[first_bone_node] : make_skeleton_id(filepath, i);
+                asset_data.m_skeleton_id = skeleton_id;
+
+                skeleton_asset skeleton_asset{};
+                skeleton_asset.m_bones.resize(num_bones);
+                skeleton_asset.m_skeleton_id = skeleton_id;
+
+                // parse bones
+                umap<aiNode*, uint32> bone_node_to_idx{};
+                for (uint32 b = 0u; b < num_bones; ++b)
+                {
+                    auto& asset_bone = skeleton_asset.m_bones[b];
+                    const aiBone* bone = mesh->mBones[b];
+                    asset_bone.m_mat_inverse_bind = to_glm(bone->mOffsetMatrix);
+                    asset_bone.m_mat_transform = (b == 0u) ? glm::mat4x4(1) : to_glm(bone->mNode->mTransformation);
+                    asset_bone.m_name = bone->mName.C_Str();
+                    bone_node_to_idx[bone->mNode] = b;
+                    node_name_to_skeleton_id[bone->mNode->mName.C_Str()] = skeleton_id;
+                    skeleton_asset.m_name_to_bone_idx[asset_bone.m_name] = b;
+
+                    for (uint32 w = 0u; w < bone->mNumWeights; ++w)
+                    {
+                        const aiVertexWeight& weight = bone->mWeights[w];
+                        mesh_asset::vertex& vertex = asset_data.m_vertices[weight.mVertexId];
+                        
+                        // bind the bone to the vertex with a weight
+                        const float added_weight = glm::min(vertex.m_weight_remainder, weight.mWeight);
+                        vertex.m_bone_indices[vertex.m_num_active_bones] = b;
+                        vertex.m_bone_weights[vertex.m_num_active_bones] = added_weight;
+                        vertex.m_weight_remainder -= added_weight;
+                        vertex.m_num_active_bones++;
+                    }
                 }
+                for (uint32 b = 0u; b < num_bones; ++b)
+                {
+                    aiNode* parent_node = mesh->mBones[b]->mNode->mParent;
+                    if (bone_node_to_idx.contains(parent_node))
+                    {
+                        const uint32 parent_index = bone_node_to_idx[mesh->mBones[b]->mNode->mParent];
+                        skeleton_asset.m_bones[b].m_parent_idx = bone_node_to_idx[parent_node];
+                        skeleton_asset.m_bones[b].m_valid_parent = true;
+                    }
+                }
+
+                if (!skeleton_already_created)
+                {
+                    allocate_asset<asset_type::skeleton>(skeleton_id, skeleton_asset, root_id);
+                    first_bone_node_to_skeleton_id[first_bone_node] = skeleton_id;
+                }
+                asset_data.m_skeleton_id = skeleton_id;
             }
 
             // calculate avg distances
@@ -328,26 +370,6 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             allocate_asset<asset_type::mesh>(mesh_id, asset_data, root_id);
         }
 
-        // parse fbx skeletons
-        // https://blinkinglights.io/blog/skeletal-animation-with-assimp#_1-vertex-bone-weights-indices
-        for (uint32 i = 0u; i < scene->mNumSkeletons; ++i)
-        {
-            const skel_id skeleton_id = make_skeleton_id(filepath, i);
-
-            // fill the raw data asset
-            skeleton_asset asset{};
-            const auto& skeleton = scene->mSkeletons[i];
-            const uint32 num_bones = skeleton->mNumBones;
-            asset.m_bones.resize(num_bones);
-            for (uint32 b = 0u; b < num_bones; ++b)
-            {
-                const auto& bone = skeleton->mBones[b];
-                asset.m_bones[b].m_local_matrix = to_glm(bone->mLocalMatrix);
-                asset.m_bones[b].m_offset_matrix = to_glm(bone->mOffsetMatrix);
-            }
-            allocate_asset<asset_type::skeleton>(skeleton_id, asset, root_id);
-        }
-
         // parse fbx animations
         for (uint32 i = 0u; i < scene->mNumAnimations; ++i)
         {
@@ -362,12 +384,15 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             {
                 animation_asset::channel& target_channel = asset.m_channels[c];
                 const auto& channel = animation->mChannels[c];
+                
                 const uint32 num_position_keys = channel->mNumPositionKeys;
                 const uint32 num_rotation_keys = channel->mNumRotationKeys;
                 const uint32 num_scaling_keys = channel->mNumScalingKeys;
                 target_channel.m_position_keys.resize(num_position_keys);
                 target_channel.m_rotation_keys.resize(num_rotation_keys);
                 target_channel.m_scale_keys.resize(num_scaling_keys);
+                target_channel.m_name = channel->mNodeName.C_Str();
+                asset.m_name_to_channel_idx[target_channel.m_name] = c;
                 
                 for (uint32 k = 0u; k < num_position_keys; ++k)
                 {
@@ -393,7 +418,8 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
                     memcpy(&target_key.m_value, &key.mValue, sizeof(float3));
                     memcpy(&target_key.m_blend, &key.mInterpolation, sizeof(uint32));
                 }
-            }      
+            }
+
 #if 0
             for (uint32 c = 0u; c < animation->mNumMeshChannels; ++c)
             {
@@ -509,6 +535,64 @@ result<mesh_id> contentman::find_mesh(const stringview& name) const
     }
 
     return restype::make_fail("mesh not found!");
+}
+
+bool contentman::is_compatible(const anim_id animation, const skel_id skeleton) const
+{
+    animation_asset const* anim_asset = nullptr;
+    auto found_anim = find_typed_asset<asset_type::animation>(animation);
+    if (found_anim.is_fail())
+    {
+        return false;
+    }
+
+    skeleton_asset const* skel_asset = nullptr;
+    auto found_skeleton = find_typed_asset<asset_type::skeleton>(skeleton);
+    if (found_skeleton.is_fail())
+    {
+        return false;
+    }
+
+    const auto& bone_names = found_skeleton.claim()->m_name_to_bone_idx;
+    const auto& channel_names = found_anim.claim()->m_name_to_channel_idx;
+    for (const auto& pair : channel_names)
+    {
+        if (!bone_names.contains(pair.first))
+            return false;
+    }
+
+    return true;
+}
+
+bool contentman::find_compatible_animations(const skel_id skeleton, vector<anim_id>& out_anims) const
+{
+    skeleton_asset const* skel_asset = nullptr;
+    auto found_skeleton = find_typed_asset<asset_type::skeleton>(skeleton);
+    if (found_skeleton.is_fail())
+    {
+        return false;
+    }
+    const auto& bone_names = found_skeleton.claim()->m_name_to_bone_idx;
+    
+    for (const auto& anim_asset : get_typed_assets<asset_type::animation>().m_asset_datas)
+    {
+        bool is_compatible = true;
+        const auto& channel_names = anim_asset.m_name_to_channel_idx;
+        for (const auto& pair : channel_names)
+        {
+            if (!bone_names.contains(pair.first))
+            {
+                is_compatible = false;
+                break;
+            }
+        }
+
+        if (is_compatible)
+        {
+            out_anims.push_back(anim_asset.m_animation_id);
+        }
+    }
+    return true;
 }
 
 result<asset_id> contentman::load_fbx(const stringview& filepath)

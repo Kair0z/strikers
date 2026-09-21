@@ -10,6 +10,19 @@
 #include "dxcapi.h"
 
 namespace strikers {
+struct gpu_optional
+{
+	int32 m_value = -1;
+	void set_null() { m_value = -1; }
+	void set(int value) { m_value = value; }
+
+	gpu_optional& operator=(int32 value) {
+		set(value);
+		return *this;
+	}
+
+	int32 get() const { return m_value; }
+};
 struct gpu_vertex
 {
 	float3 m_position;
@@ -22,7 +35,8 @@ struct gpu_instance
 {
 	mat4x4 m_transform;
 	float4 m_color;
-	uint32 m_tex_basecolor_idx;
+	gpu_optional m_bone_instance_offset;
+	gpu_optional m_tex_basecolor_idx;
 };
 struct gpu_ui_instance
 {
@@ -31,23 +45,32 @@ struct gpu_ui_instance
 };
 struct gpu_bone
 {
-	float4x4 m_matrix;
 	int m_parent;
+	float4x4 m_local_transform;
+	float4x4 m_inverse_bind;
+};
+struct gpu_bone_instance
+{
+	uint32 m_bone_index;
+	gpu_optional m_anim_index;
+	float m_anim_time;
+	float4x4 m_matrix;
+};
+struct gpu_skeleton
+{
+	uint32 m_num_instances;
+	uint32 m_bone_instance_offset;
 };
 struct gpu_cbuffer_global
 {
 	float4x4 m_mat_to_lightspace;
 	float4 m_light_color;
 	float4 m_light_direction;
-	uint32 m_texid_shadows;
+	gpu_optional m_texid_shadows;
 };
 struct gpu_cbuffer_view
 {
 	mat4x4 m_viewprojection;
-};
-struct gpu_cbuffer_material
-{
-
 };
 struct gpu_line_instance
 {
@@ -55,6 +78,40 @@ struct gpu_line_instance
 	float3 m_point_a;
 	float3 m_point_b;
 };
+struct gpu_quad_instance
+{
+	float4x4 m_transform;
+	float4 m_color;
+	float4 m_rect_uv;
+	uint32 m_texid_color;
+};
+struct gpu_animation
+{
+	uint32 first_keyframe;
+	uint32 num_keyframes;
+};
+struct gpu_keyframe
+{
+	float4 m_rotation;
+	float3 m_position;
+	float3 m_scale;
+};
+
+class contentman;
+using dxdevice = ID3D12Device;
+using dxswapchain = IDXGISwapChain4;
+using dxadapter = IDXGIAdapter1;
+using dxqueue = ID3D12CommandQueue;
+using dxfactory = IDXGIFactory7;
+using dxallocator = ID3D12CommandAllocator;
+using dxcmdlist = ID3D12GraphicsCommandList;
+using dxdescheap = ID3D12DescriptorHeap;
+using dxresource = ID3D12Resource;
+using dxfence = ID3D12Fence;
+using dxstate = ID3D12StateObject;
+using dxsignature = ID3D12RootSignature;
+using dxresource_state = D3D12_RESOURCE_STATES;
+using dxpipeline = ID3D12PipelineState;
 
 struct cbuffer final
 {
@@ -75,7 +132,6 @@ struct cbuffer final
 		return 0u;
 	}
 };
-
 struct view final
 {
 	enum slot
@@ -85,28 +141,14 @@ struct view final
 		num
 	};
 };
-
-class contentman;
-using dxdevice = ID3D12Device;
-using dxswapchain = IDXGISwapChain4;
-using dxadapter = IDXGIAdapter1;
-using dxqueue = ID3D12CommandQueue;
-using dxfactory = IDXGIFactory7;
-using dxallocator = ID3D12CommandAllocator;
-using dxcmdlist = ID3D12GraphicsCommandList;
-using dxdescheap = ID3D12DescriptorHeap;
-using dxresource = ID3D12Resource;
-using dxfence = ID3D12Fence;
-using dxstate = ID3D12StateObject;
-using dxsignature = ID3D12RootSignature;
-using dxresource_state = D3D12_RESOURCE_STATES;
-using dxpipeline = ID3D12PipelineState;
-
-enum class shader
+struct shader
 {
-	shaded,
-	wireframe,
-	num
+	enum slot
+	{
+		shaded,
+		wireframe,
+		num
+	};
 };
 
 class renderscene final
@@ -129,7 +171,7 @@ public:
 	struct batch_key
 	{
 		mesh_id m_mesh;
-		shader m_shader;
+		shader::slot m_shader;
 
 		struct hash_t {
 			uint64 operator()(const batch_key& k) const {
@@ -146,23 +188,31 @@ public:
 
 	struct mesh_instance
 	{
-		transform m_transform;
-		float4 m_color;
-		float m_time;
+		transform		m_transform;
+		float4			m_color;
+		float			m_time;
 
-		// bindings
-		mesh_id m_mesh				= k_id_invalid;
-		skel_id m_skeleton			= k_id_invalid;
-		shader m_shader				= shader::shaded;
-		image_id m_img_basecolor	= k_id_invalid;
+		uint32			m_skeleton_instance_id	= (uint32)-1;
+		mesh_id			m_mesh					= k_id_invalid;
+		skel_id			m_skeleton				= k_id_invalid;
+		shader::slot	m_shader				= shader::shaded;
+		image_id		m_img_basecolor			= k_id_invalid;
+		anim_id			m_animation				= k_id_invalid;
 
 		void apply_material(const contentman& cman, const mat_id mat);
-		
 		mesh_instance& transform(const transform& trans)
 		{
 			m_transform = trans;
 			return *this;
 		}
+	};
+
+	struct quad_instance
+	{
+		transform m_transform;
+		float4 m_color;
+		image_id m_image = k_id_invalid;
+		rect m_rect_uv;
 	};
 
 	struct ui_instance
@@ -196,9 +246,10 @@ public:
 		const line_builder& add_transform(const transform& transform) const;
 	};
 
-	mesh_instance& add_mesh_instance(const mesh_id mesh, const shader shdr)
+	mesh_instance& add_mesh_instance(const mesh_id mesh, const shader::slot shdr)
 	{
 		m_batch_instance_lookup[{mesh, shdr}].push_back((uint32)m_mesh_instances.size());
+
 		m_mesh_instances.push_back({});
 		m_mesh_instances.back().m_mesh = mesh;
 		return m_mesh_instances.back();
@@ -214,6 +265,12 @@ public:
 	{
 		m_line_instances.push_back({});
 		return m_line_instances.back();
+	}
+
+	quad_instance& add_quad_instance()
+	{
+		m_quad_instances.push_back({});
+		return m_quad_instances.back();
 	}
 
 	uint32 get_meshbatch_num_instances(const batch_key& key) const
@@ -232,10 +289,16 @@ public:
 		return 0;
 	}
 
+	bool any_meshes() const
+	{
+		return !m_mesh_instances.empty() && !m_batch_instance_lookup.empty();
+	}
+
 	umap<batch_key, vector<uint32>, batch_key::hash_t, batch_key::equal_t> m_batch_instance_lookup;
 	vector<mesh_instance> m_mesh_instances;
 	vector<ui_instance> m_ui_instances;
 	vector<line_instance> m_line_instances;
+	vector<quad_instance> m_quad_instances;
 };
 
 enum class shader_type
@@ -569,8 +632,7 @@ struct gpu_resource
 
 		// When D3D12_RESOURCE_DESC::Layout is D3D12_TEXTURE_LAYOUT_ROW_MAJOR, the D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL flag cannot be set
 		if (builder.m_create_flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL
-			|| builder.m_create_flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET
-			|| builder.m_create_flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+			|| builder.m_create_flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
 			desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
 
 		desc.Flags = builder.m_create_flags;
@@ -613,9 +675,14 @@ struct gpu_resource
 
 	bool is_valid() const { return m_resource != nullptr; }
 
+	uint32 buffer_bytesize() const
+	{
+		return  m_resource->GetDesc().Width;
+	}
+
 	bool buffer_needs_realloc(const uint64 req_bytesize) const
 	{
-		return !is_valid() || m_resource->GetDesc().Width < req_bytesize;
+		return !is_valid() || buffer_bytesize() < req_bytesize;
 	}
 
 	bool get_dxdesc(D3D12_RESOURCE_DESC& out_desc)
@@ -626,6 +693,12 @@ struct gpu_resource
 		}
 		else return false;
 	}
+
+	D3D12_GPU_VIRTUAL_ADDRESS gpu_address() const
+	{
+		return m_resource->GetGPUVirtualAddress();
+	}
+
 	dxresource* m_resource = nullptr;
 	builder m_builder;
 	dxresource_state m_previous_state;
@@ -653,7 +726,6 @@ result<> map_resource(gpu_resource& resource, _fn&& func)
 {
 	return map_resource<_t>(*resource.m_resource, func);
 }
-
 
 class renderman final
 {
@@ -759,6 +831,7 @@ class renderman final
 		pip_shading,
 		pip_wireframe,
 		pip_lines,
+		pip_quads,
 		pip_ui,
 		pip_num = pip_ui - cpip_num + 2
 	};
@@ -806,10 +879,60 @@ class renderman final
 	gpu_resource m_instancebuffer;
 	gpu_resource m_instancebuffer_ui;
 	gpu_resource m_instancebuffer_lines;
+	gpu_resource m_instancebuffer_quads;
 	descriptor m_instancebuffer_srv;
 	descriptor m_instancebuffer_ui_srv;
 	descriptor m_instancebuffer_lines_srv;
-	
+	descriptor m_instancebuffer_quads_srv;
+
+	struct bone_buffers final
+	{
+		gpu_resource m_bone_buffer;
+		gpu_resource m_bone_upload;
+		gpu_resource m_bone_instance_buffer;
+		gpu_resource m_bone_instance_upload;
+
+		struct skeleton_instance_info final
+		{
+			float m_time = 0.0f;
+		};
+		struct skeleton_info final
+		{
+			uint32 m_bone_offset;
+			uint32 m_bone_instance_offset;
+			vector<gpu_bone> m_gpu_bones{};
+			vector<skeleton_instance_info> m_instances{};
+		};
+		umap<skel_id, skeleton_info> m_skeleton_infos{};
+		uint32 m_total_num_bones = 0u;
+		bool m_needs_upload = false;
+
+		uint32 total_num_bone_instances() const
+		{
+			uint32 sum = 0u;
+			for (const auto& pair : m_skeleton_infos)
+			{
+				const uint32 num_bones = pair.second.m_gpu_bones.size();
+				const uint32 num_instances = pair.second.m_instances.size();
+				sum += num_bones * num_instances;
+			}
+			return sum;
+		}
+	};
+	bone_buffers m_bone_buffers;
+
+	struct animation_buffers final
+	{
+		gpu_resource m_animation_buffer;
+		gpu_resource m_keyframe_buffer;
+		gpu_resource m_animation_staging;
+		gpu_resource m_keyframe_staging;
+		vector<gpu_keyframe> m_keyframes{};
+		vector<gpu_animation> m_animations{};
+		umap<anim_id, uint32> m_animation_to_idx;
+	};
+	animation_buffers m_anim_buffers;
+
 	struct cbuffers final
 	{
 		vector<gpu_resource> m_resources[cbuffer::num];
@@ -827,18 +950,6 @@ class renderman final
 		}
 	};
 	cbuffers m_cbuffers;
-	
-	dxresource* m_bonebuffer;
-	descriptor m_bonebuffer_srv;
-
-	struct skeletonbuffers final
-	{
-		gpu_resource m_bone_buffer;			// static bone data from content
-		gpu_resource m_bone_buffer_staging;	// static bone data from content
-		gpu_resource m_skinned_buffer;		// output of the GPU skinning
-		bool m_uploaded = false;
-	};
-	umap<skel_id, skeletonbuffers> m_skel_buffers;
 
 	struct texture
 	{
@@ -867,8 +978,14 @@ public:
 		const descriptor& source_descriptor,
 		uint32& out_gpu_heap_index,
 		D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_handle = nullptr);
+	bool push_gpu_resource_descriptor(
+		dxdevice& device,
+		const descriptor& source_descriptor,
+		gpu_optional& out_gpu_heap_index,
+		D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_handle = nullptr);
 
 	void render(renderscene& scene, const contentman& contentman);
+	void dispatch_skinning(renderscene& scene, const contentman& cman);
 	void render_shadows(renderscene& scene, const contentman& contentman);
 
 	result<descriptor> create_resource_descriptor(dxresource& resource, const descriptor::builder& builder);
@@ -880,10 +997,11 @@ public:
 	result<> register_window(void* platform_handle);
 
 private:
-	void process_scene(renderscene& scene, const contentman& cman);
-	void upload_buffers();
+	void process_scene_instances(renderscene& scene, const contentman& cman);
+	void upload_cpu_to_gpu();
 	void reallocate_image_texture(const contentman& cman, image_id id);
-	void reallocate_skeleton_buffers(const contentman& cman, skel_id id);
+	bool reallocate_skeleton_buffers(const contentman& cman, skel_id id);
+	bool reallocate_animation_buffers(const contentman& cman, anim_id id);
 	static void populate_vertex_shader_input(renderman::pipeline_desc& pipeline);
 };
 }

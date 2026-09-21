@@ -18,11 +18,6 @@ enum class asset_type
 	num
 };
 
-struct fbx_load_args final
-{
-
-};
-
 struct asset_scan_report
 {
 
@@ -103,6 +98,7 @@ struct mesh_asset final
 	scene_id m_scene_id{};
 	mat_id m_mat_id{};
 	string m_name;
+	skel_id m_skeleton_id = k_id_invalid;
 	sphere m_bounds_sphere;
 	box m_bounds_box;
 
@@ -114,6 +110,7 @@ struct mesh_asset final
 		uint4 m_bone_indices;
 		float4 m_bone_weights;
 		uint32 m_num_active_bones;
+		float m_weight_remainder = 1.0f;
 	};
 	vector<vertex> m_vertices{};
 	vector<uint32> m_indices{};
@@ -151,13 +148,15 @@ struct skeleton_asset final
 {
 	struct bone
 	{
+		string m_name;
 		uint32 m_parent_idx;
-		float4x4 m_offset_matrix;
-		float4x4 m_local_matrix;
+		float4x4 m_mat_inverse_bind;
+		float4x4 m_mat_transform;
+		bool m_valid_parent = false;
 	};
-
-	skel_id m_skeleton_id;
+	skel_id m_skeleton_id = k_id_invalid;
 	vector<bone> m_bones{};
+	umap<string, uint32> m_name_to_bone_idx{};
 };
 
 struct animation_asset final
@@ -181,13 +180,16 @@ struct animation_asset final
 
 	struct channel
 	{
+		string m_name;
 		vector<keyframe<float3>> m_position_keys;
 		vector<keyframe<float3>> m_scale_keys;
 		vector<keyframe<float4>> m_rotation_keys; // float4 -> quaternion
 	};
 
+	uset<skel_id> m_compatible_skeletons;
 	anim_id m_animation_id;
 	vector<channel> m_channels{};
+	umap<string, uint32> m_name_to_channel_idx;
 };
 
 struct material_asset final
@@ -367,6 +369,13 @@ public:
 			);
 	}
 
+	// checks whether an animation asset is compatible with a skeleton
+	// - if any of the input assets ids are not valid, this returns false
+	// - if the animation contains a channel of name that doesn't match skeleton, this returns false
+	bool is_compatible(const anim_id animation, const skel_id skeleton) const;
+
+	bool find_compatible_animations(const skel_id skeleton, vector<anim_id>& out_anims) const;
+	
 	template <asset_type _t>
 	bool is_typed_asset_loaded(const asset_id_t<_t>& id) const
 	{
@@ -400,6 +409,9 @@ public:
 	}
 	material_asset const* find_material(const mat_id id) const {
 		return find_typed_asset<asset_type::material>(id).claim();
+	}
+	image_asset const* find_image(const image_id id) const {
+		return find_typed_asset<asset_type::image>(id).claim();
 	}
 	bool find_mesh_and_material(const mesh_id id, mesh_asset const*& out_mesh, material_asset const*& out_material) const {
 		auto mesh = find_typed_asset<asset_type::mesh>(id);

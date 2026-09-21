@@ -1,5 +1,5 @@
 # camera
-camera_dev_control  0;
+camera_dev_control  1;
 camera_dev_reset    r;
 camera_dev_left     a;
 camera_dev_right    d;
@@ -30,7 +30,7 @@ game_ball_shot_spd 55;
 game_ball_mxsp -1;
 
 # AI
-game_ai 1;
+game_ai 0;
 game_ai_min_dtime 0.1;
 game_ai_max_dtime 1.1;
 game_ai_random 0.0000000001;

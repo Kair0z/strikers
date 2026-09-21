@@ -9,15 +9,19 @@
     "SRV(t0),"\
     "SRV(t1)"
 
+static const int k_invalid = -1;
+
 struct instance
 {
     float4x4    transform;
     float4      color;
-    uint        texid_basecolor;
+    int         bone_instance_offset;
+    int         texid_basecolor;
 };
-struct bone
+struct bone_instance
 {
-    float4x4 transform;
+    uint bone_index;
+    float4x4 skin_matrix;
 };
 struct vs_input
 {
@@ -34,35 +38,43 @@ struct ps_input
     float4 color : COLOR0;
     float3 normal_ws : NORMAL0;
     float2 uv : TEXCOORD0;
-    uint texid_basecolor : TEXCOORD1;
+    int texid_basecolor : TEXCOORD1;
 };
 cbuffer cbuffer_global : register(b0)
 {
     float4x4 k_mat_to_lightspace;
     float4 k_light_color;
     float4 k_light_direction;
-    uint k_texid_shadows;
+    int k_texid_shadows;
 };
 cbuffer cbuffer_view : register(b1)
 {
     float4x4 k_viewprojection;
 };
-StructuredBuffer<instance>  t_instances  : register(t0);
-StructuredBuffer<bone>      t_bones      : register(t1);
-
-bool is_texid_valid(uint id)
-{
-    return id != 0;
-}
+StructuredBuffer<instance>          t_instances         : register(t0);
+StructuredBuffer<bone_instance>     t_bone_instances    : register(t1);
 
 [Shader("vertex")]
 ps_input main_vs(vs_input input, uint instance_id : SV_InstanceID, uint start_instance_id : SV_StartInstanceLocation, uint vertex_id : SV_VertexID)
 {
-    instance instance = t_instances[instance_id + start_instance_id];
-    
     ps_input output;
-    output.position_ws = mul(instance.transform, float4(input.position, 1));
+    instance instance = t_instances[instance_id + start_instance_id];
+     
+    float4 position_os = float4(input.position.xyz, 1);
+    if (instance.bone_instance_offset != k_invalid)
+    {        
+        const float4 skinned_position = 
+            input.bone_weights.x * mul(t_bone_instances[instance.bone_instance_offset + input.bone_ids.x].skin_matrix, float4(position_os.xyz, 1)) +
+            input.bone_weights.y * mul(t_bone_instances[instance.bone_instance_offset + input.bone_ids.y].skin_matrix, float4(position_os.xyz, 1)) +
+            input.bone_weights.z * mul(t_bone_instances[instance.bone_instance_offset + input.bone_ids.z].skin_matrix, float4(position_os.xyz, 1)) +
+            input.bone_weights.w * mul(t_bone_instances[instance.bone_instance_offset + input.bone_ids.w].skin_matrix, float4(position_os.xyz, 1));
+        
+        position_os = skinned_position;
+    }
+
+    output.position_ws = mul(instance.transform, float4(position_os.xyz, 1));
     output.position_cs = mul(k_viewprojection, float4(output.position_ws.xyz, 1));
+
     output.color = instance.color;
     output.normal_ws = normalize(mul((float3x3)instance.transform, input.normal));
     output.uv = input.uv;
@@ -73,7 +85,7 @@ ps_input main_vs(vs_input input, uint instance_id : SV_InstanceID, uint start_in
 float shadow_term(float3 position_ws, float3 normal_ws)
 {
     static const float k_no_shadow = 1.0f;
-    if (!is_texid_valid(k_texid_shadows)) 
+    if (k_texid_shadows == k_invalid) 
         return k_no_shadow;
 
     if (dot(normal_ws, k_light_direction.xyz) > 0.0f) 
@@ -109,7 +121,7 @@ float4 main_ps(ps_input input) : SV_Target0
     const float shadow = shadow_term(input.position_ws, normal_ws);
 
     float3 basecolor = input.color.rgb;
-    if (is_texid_valid(input.texid_basecolor))
+    if (input.texid_basecolor != k_invalid)
     {
         Texture2D tex_basecolor = ResourceDescriptorHeap[input.texid_basecolor];
         uint width, height, num_levels;
