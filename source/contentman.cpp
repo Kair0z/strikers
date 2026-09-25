@@ -393,6 +393,9 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
                 target_channel.m_scale_keys.resize(num_scaling_keys);
                 target_channel.m_name = channel->mNodeName.C_Str();
                 asset.m_name_to_channel_idx[target_channel.m_name] = c;
+
+                // if this is ever different, our systems can't handle that...
+                assert(num_position_keys == num_rotation_keys == num_scaling_keys);
                 
                 for (uint32 k = 0u; k < num_position_keys; ++k)
                 {

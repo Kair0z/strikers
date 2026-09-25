@@ -20,7 +20,9 @@ struct instance
 struct bone_instance
 {
     uint bone_index;
-    float4x4 skin_matrix;
+    int anim_index;
+    float anim_time; // normalized (not seconds)
+    float4x4 skinned_matrix;
 };
 struct vs_input
 {
@@ -50,10 +52,10 @@ float4 main_vs(
     if (instance.bone_instance_offset != k_invalid)
     {        
         const float4 skinned_position = 
-            vertex.bone_weights.x * mul(t_bone_instances[instance.bone_instance_offset + vertex.bone_ids.x].skin_matrix, float4(position_os.xyz, 1)) +
-            vertex.bone_weights.y * mul(t_bone_instances[instance.bone_instance_offset + vertex.bone_ids.y].skin_matrix, float4(position_os.xyz, 1)) +
-            vertex.bone_weights.z * mul(t_bone_instances[instance.bone_instance_offset + vertex.bone_ids.z].skin_matrix, float4(position_os.xyz, 1)) +
-            vertex.bone_weights.w * mul(t_bone_instances[instance.bone_instance_offset + vertex.bone_ids.w].skin_matrix, float4(position_os.xyz, 1));
+            vertex.bone_weights.x * mul(t_bone_instances[instance.bone_instance_offset + vertex.bone_ids.x].skinned_matrix, float4(position_os.xyz, 1)) +
+            vertex.bone_weights.y * mul(t_bone_instances[instance.bone_instance_offset + vertex.bone_ids.y].skinned_matrix, float4(position_os.xyz, 1)) +
+            vertex.bone_weights.z * mul(t_bone_instances[instance.bone_instance_offset + vertex.bone_ids.z].skinned_matrix, float4(position_os.xyz, 1)) +
+            vertex.bone_weights.w * mul(t_bone_instances[instance.bone_instance_offset + vertex.bone_ids.w].skinned_matrix, float4(position_os.xyz, 1));
         
         position_os = skinned_position;
     }

@@ -1260,6 +1260,7 @@ void renderman::process_scene_instances(renderscene& scene, const contentman& cm
 
 				bone_buffers::skeleton_instance_info skeleton_instance{};
 				skeleton_instance.m_time = instance.m_time;
+				instance.m_skeleton_instance_id = skeleton.m_instances.size();
 				skeleton.m_instances.push_back(skeleton_instance);
 			}
 			
@@ -1997,6 +1998,7 @@ bool renderman::push_gpu_resource_descriptor(
 		return false;
 	}
 }
+
 result<> renderman::register_window(void* platform_handle)
 {
 	using restype = result<>;
@@ -2144,6 +2146,7 @@ const renderscene::line_builder& renderscene::line_builder::add_sphere(const tra
 	}
 	return *this;
 }
+
 const renderscene::line_builder& renderscene::line_builder::add_box(const transform& transform, const box& box, const float4& color) const
 {
 	const float3 corners[8] =
@@ -2171,6 +2174,7 @@ const renderscene::line_builder& renderscene::line_builder::add_box(const transf
 	}
 	return *this;
 }
+
 const renderscene::line_builder& renderscene::line_builder::add_transform(const transform& transform) const
 {
 	m_owner.m_line_instances.reserve(m_owner.m_line_instances.size() + 3);
@@ -2205,14 +2209,17 @@ void renderman::cbuffers::ensure_allocated(renderman& owner, cbuffer::slot slot,
 		).claim();
 	}
 }
+
 uint32 renderman::cbuffers::num(cbuffer::slot slot) const
 {
 	return (uint32)m_resources[slot].size();
 }
+
 gpu_resource& renderman::cbuffers::resource(cbuffer::slot slot, uint32 idx)
 {
 	return m_resources[slot][idx];
 }
+
 descriptor* renderman::cbuffers::cbv(cbuffer::slot slot, uint32 idx)
 {
 	return &m_cbvs[slot][idx];

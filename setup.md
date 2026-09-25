@@ -1,8 +1,8 @@
 [team_left]
-cb = toad;
-lw = toad;
-rw = toad;
-cap = yoshi;
+cb = luigi;
+lw = luigi;
+rw = luigi;
+cap = luigi;
 
 [team_right]
 cb = toad;

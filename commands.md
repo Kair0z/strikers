@@ -40,9 +40,9 @@ phx_enabled 1;
 phx_gravity_enabled 0;
 
 # draw
-draw_dbg 0;
+draw_dbg 1;
 draw_dbg_bounds 1;
-draw_dbg_ball 1;
+draw_dbg_ball 0;
 
 # graphics
 gfx_shadowmap_size 45;

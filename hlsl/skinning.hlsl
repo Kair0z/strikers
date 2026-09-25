@@ -41,11 +41,7 @@ float4x4 get_bone_local_transform(uint bone_instance_idx)
 {
     const uint bone_index = u_bone_instances[bone_instance_idx].bone_index;
     const uint anim_index = u_bone_instances[bone_instance_idx].anim_index;
-    if (anim_index != k_invalid)
-    {
-        return t_bones[bone_index].transform;
-    }
-    else 
+    if (anim_index != k_invalid && false)
     {
         const float4x4 base_transform = t_bones[bone_index].transform;
         const uint first_keyframe = t_animations[anim_index].first_keyframe;
@@ -55,6 +51,10 @@ float4x4 get_bone_local_transform(uint bone_instance_idx)
         const uint current_keyframe_idx = round(lerp(first_keyframe, num_keyframes - 1, time));
         const keyframe current_keyframe = t_keyframes[current_keyframe_idx];
         return base_transform;
+    }
+    else 
+    {
+        return t_bones[bone_index].transform;
     }
 }
 
