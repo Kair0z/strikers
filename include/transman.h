@@ -47,14 +47,17 @@ class transman
 		trs m_trs_world;
 		trs m_trs_world_inv;
 		trs m_trs_local_reset;
+		transform m_transform_world;
+		transform m_transform_local;
 		bool m_world_dirty = false;
 	};
 
 	using graph = flatgraph<entry>;
 	using transform_id = graph::node_idx;
 	graph m_graph;
-	
+
 	void resolve_parents(trans_id id);
+	static transform trs_to_transform(const trs& trans);
 
 public:
 	// adds a transform to the hierarchy, ensuring absolute world transform is maintained despite the parent
@@ -75,13 +78,14 @@ public:
 	float3 get_position(trans_id id, space spc);
 	rotation get_rotation(trans_id id, space spc);
 	float3 get_scale(trans_id id, space spc);
-
+	
 	void add_position(trans_id id, const float3& delta, space spc);
 	void add_rotation(trans_id id, const rotation& delta, space spc);
 	void mult_scale(trans_id id, const float3& multiplier, space spc);
 
 	void save_as_reset(); // saves all transforms as 'reset'
 	void reset();
+	void reset(trans_id id);
 
 	vector<trans_id> get_transforms() const;
 };

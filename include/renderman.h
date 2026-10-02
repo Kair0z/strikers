@@ -10,92 +10,19 @@
 #include "dxcapi.h"
 
 namespace strikers {
-struct gpu_optional
-{
-	int32 m_value = -1;
-	void set_null() { m_value = -1; }
-	void set(int value) { m_value = value; }
+// hlsl frontend
+#include "frontend.hlsl"
 
-	gpu_optional& operator=(int32 value) {
-		set(value);
-		return *this;
-	}
-
-	int32 get() const { return m_value; }
-};
-struct gpu_vertex
-{
-	float3 m_position;
-	float3 m_normal;
-	float2 m_uv;
-	uint4 m_bone_ids;
-	float4 m_bone_weights;
-};
-struct gpu_instance
-{
-	mat4x4 m_transform;
-	float4 m_color;
-	gpu_optional m_bone_instance_offset;
-	gpu_optional m_tex_basecolor_idx;
-};
-struct gpu_ui_instance
-{
-	float4 m_box;
-	uint32 m_tex_heap_idx;
-};
-struct gpu_bone
-{
-	int m_parent;
-	float4x4 m_local_transform;
-	float4x4 m_inverse_bind;
-};
-struct gpu_bone_instance
-{
-	uint32 m_bone_index;
-	gpu_optional m_anim_index;
-	float m_anim_time;
-	float4x4 m_matrix;
-};
-struct gpu_skeleton
-{
-	uint32 m_num_instances;
-	uint32 m_bone_instance_offset;
-};
-struct gpu_cbuffer_global
-{
-	float4x4 m_mat_to_lightspace;
-	float4 m_light_color;
-	float4 m_light_direction;
-	gpu_optional m_texid_shadows;
-};
-struct gpu_cbuffer_view
-{
-	mat4x4 m_viewprojection;
-};
-struct gpu_line_instance
-{
-	float4 m_color;
-	float3 m_point_a;
-	float3 m_point_b;
-};
-struct gpu_quad_instance
-{
-	float4x4 m_transform;
-	float4 m_color;
-	float4 m_rect_uv;
-	uint32 m_texid_color;
-};
-struct gpu_animation
-{
-	uint32 first_keyframe;
-	uint32 num_keyframes;
-};
-struct gpu_keyframe
-{
-	float4 m_rotation;
-	float3 m_position;
-	float3 m_scale;
-};
+using gpu_optional = hlsl::gpu_optional;
+using gpu_vertex = hlsl::mesh_vertex;
+using gpu_instance = hlsl::mesh_instance;
+using gpu_ui_instance = hlsl::ui_instance;
+using gpu_bone = hlsl::bone;
+using gpu_bone_instance = hlsl::bone_instance;
+using gpu_cbuffer_global = hlsl::cbuffer_global;
+using gpu_cbuffer_view = hlsl::cbuffer_view;
+using gpu_line_instance = hlsl::line_instance;
+using gpu_quad_instance = hlsl::quad_instance;
 
 class contentman;
 using dxdevice = ID3D12Device;
@@ -154,12 +81,8 @@ struct shader
 class renderscene final
 {
 public:
-	struct {
-		transform m_transform;
-		float m_fov;
-		float m_near;
-		float m_far;
-	} m_camera;
+	camera m_camera;
+	transform m_camera_transform;
 	struct {
 		float4x4 m_mat_to_lightspace;
 		transform m_transform;
@@ -192,7 +115,7 @@ public:
 		float4			m_color;
 		float			m_time;
 
-		uint32			m_skeleton_instance_id	= (uint32)-1;
+		uint32			m_skeleton_instance_idx	= (uint32)-1;
 		mesh_id			m_mesh					= k_id_invalid;
 		skel_id			m_skeleton				= k_id_invalid;
 		shader::slot	m_shader				= shader::shaded;
@@ -352,16 +275,18 @@ private:
 	HMODULE dll_dxcompiler;
 	IDxcUtils* m_utils;
 	IDxcCompiler3* m_compiler;
+	IDxcIncludeHandler* m_includer;
 	umap<shader_key, shader_entry> m_shaders;
 	result<IDxcOperationResult*> compile_dxc_file(const DxcBuffer& filebuffer, const vector<string>& args)
 	{
 		using restype = result<IDxcOperationResult*>;
-		
+
 		vector<wstring> wargs{};
 		for (const string& str : args)
 		{
 			wargs.push_back(to_wstring(str));
 		}
+
 		vector<LPCWSTR> converted_args{};
 		for (const wstring& wstr : wargs)
 		{
@@ -369,7 +294,7 @@ private:
 		}
 
 		IDxcOperationResult* operation_result;
-		HRESULT hres = m_compiler->Compile(&filebuffer, converted_args.data(), (uint32)converted_args.size(), nullptr, IID_PPV_ARGS(&operation_result));
+		HRESULT hres = m_compiler->Compile(&filebuffer, converted_args.data(), (uint32)converted_args.size(), m_includer, IID_PPV_ARGS(&operation_result));
 		if (!SUCCEEDED(hres))
 		{
 			return restype::make_fail("");
@@ -382,23 +307,26 @@ public:
 	shaderman() { initialize(); }
 
 	result<> initialize()
-		{
-			using restype = result<>;
-			dll_dxcompiler = LoadLibrary(L"dxcompiler.dll");
+	{
+		using restype = result<>;
+		dll_dxcompiler = LoadLibrary(L"dxcompiler.dll");
 
-			DxcCreateInstanceProc dxc_create_instance_func;
-			dxc_create_instance_func = (DxcCreateInstanceProc)GetProcAddress(dll_dxcompiler, "DxcCreateInstance");
-			if (dxc_create_instance_func == nullptr)
-				return restype::make_fail("");
+		DxcCreateInstanceProc dxc_create_instance_func;
+		dxc_create_instance_func = (DxcCreateInstanceProc)GetProcAddress(dll_dxcompiler, "DxcCreateInstance");
+		if (dxc_create_instance_func == nullptr)
+			return restype::make_fail("");
 
-			if (!SUCCEEDED(dxc_create_instance_func(CLSID_DxcUtils, IID_PPV_ARGS(&m_utils))))
-				return restype::make_fail("");
+		if (!SUCCEEDED(dxc_create_instance_func(CLSID_DxcUtils, IID_PPV_ARGS(&m_utils))))
+			return restype::make_fail("");
 
-			if (!SUCCEEDED(dxc_create_instance_func(CLSID_DxcCompiler, IID_PPV_ARGS(&m_compiler))))
-				return restype::make_fail("");
+		if (!SUCCEEDED(dxc_create_instance_func(CLSID_DxcCompiler, IID_PPV_ARGS(&m_compiler))))
+			return restype::make_fail("");
 
-			return restype::make_success();
-		}
+		if (!SUCCEEDED(m_utils->CreateDefaultIncludeHandler(&m_includer)))
+			return restype::make_fail("");
+
+		return restype::make_success();
+	}
 
 	result<> compile_shader(
 		const stringview& filepath, 
@@ -410,15 +338,15 @@ public:
 		const stringview& filepath,
 		const stringview& entrypoint,
 		const stringview& target) const
+	{
+		using restype = result<shader_entry const*>;
+		const auto& key = make_shader_key(filepath, entrypoint, target);
+		if (!m_shaders.contains(key))
 		{
-			using restype = result<shader_entry const*>;
-			const auto& key = make_shader_key(filepath, entrypoint, target);
-			if (!m_shaders.contains(key))
-			{
-				return restype::make_fail("");
-			}
-			else return &m_shaders.at(key);
+			return restype::make_fail("");
 		}
+		else return &m_shaders.at(key);
+	}
 };
 
 struct descriptor_heap final
@@ -682,7 +610,7 @@ struct gpu_resource
 
 	bool buffer_needs_realloc(const uint64 req_bytesize) const
 	{
-		return !is_valid() || buffer_bytesize() < req_bytesize;
+		return req_bytesize > 0 && (!is_valid() || buffer_bytesize() < req_bytesize);
 	}
 
 	bool get_dxdesc(D3D12_RESOURCE_DESC& out_desc)
@@ -697,6 +625,11 @@ struct gpu_resource
 	D3D12_GPU_VIRTUAL_ADDRESS gpu_address() const
 	{
 		return m_resource->GetGPUVirtualAddress();
+	}
+
+	gpu_resource::type get_type() const
+	{
+		return m_builder.m_type;
 	}
 
 	dxresource* m_resource = nullptr;
@@ -895,13 +828,15 @@ class renderman final
 		struct skeleton_instance_info final
 		{
 			float m_time = 0.0f;
+			umap<uint32, uint32> m_bone_index_to_channel_idx;
 		};
 		struct skeleton_info final
 		{
 			uint32 m_bone_offset;
 			uint32 m_bone_instance_offset;
-			vector<gpu_bone> m_gpu_bones{};
+			vector<hlsl::bone> m_gpu_bones{};
 			vector<skeleton_instance_info> m_instances{};
+			umap<string, uint32> m_bone_name_to_idx;
 		};
 		umap<skel_id, skeleton_info> m_skeleton_infos{};
 		uint32 m_total_num_bones = 0u;
@@ -912,8 +847,8 @@ class renderman final
 			uint32 sum = 0u;
 			for (const auto& pair : m_skeleton_infos)
 			{
-				const uint32 num_bones = pair.second.m_gpu_bones.size();
-				const uint32 num_instances = pair.second.m_instances.size();
+				const uint32 num_bones = (uint32)pair.second.m_gpu_bones.size();
+				const uint32 num_instances = (uint32)pair.second.m_instances.size();
 				sum += num_bones * num_instances;
 			}
 			return sum;
@@ -923,15 +858,51 @@ class renderman final
 
 	struct animation_buffers final
 	{
-		gpu_resource m_animation_buffer;
-		gpu_resource m_keyframe_buffer;
-		gpu_resource m_animation_staging;
-		gpu_resource m_keyframe_staging;
-		vector<gpu_keyframe> m_keyframes{};
-		vector<gpu_animation> m_animations{};
+		enum buffer
+		{
+			channels,
+			keyframes,
+			num
+		};
+
+		static uint64 bytestride(uint32 b)
+		{
+			static const uint64 strides[]
+			{
+				sizeof(hlsl::animation_channel),
+				sizeof(hlsl::keyframe)
+			};
+			static_assert(_countof(strides) == buffer::num);
+			return strides[b];
+		}
+
+		struct animation_info
+		{
+			uint32 m_first_channel;
+			uint32 m_num_channels;
+			umap<string, uint32> m_name_to_channel_idx;
+		};
+		gpu_resource m_buffers[buffer::num];
+		gpu_resource m_staging[buffer::num];
+		vector<hlsl::keyframe> m_keyframes{};
+		vector<hlsl::animation_channel> m_channels{};
+		vector<animation_info> m_animations{};
 		umap<anim_id, uint32> m_animation_to_idx;
+		bool m_needs_upload = false;
+
+		bool any_animations()
+		{
+			return m_animations.size() > 0;
+		}
 	};
 	animation_buffers m_anim_buffers;
+	
+	struct dummies
+	{
+		gpu_resource m_buffer;
+		gpu_resource m_texture2D;
+	};
+	dummies m_dummies;
 
 	struct cbuffers final
 	{
@@ -968,8 +939,8 @@ public:
 	void compile_shaders();
 	void compile_pipelines();
 
-	void cmd_transition_barrier(dxresource& resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
-	void cmd_transition_barrier(gpu_resource& resource, D3D12_RESOURCE_STATES after);
+	result<> state_barrier(dxresource& resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
+	result<> state_barrier(gpu_resource& resource, D3D12_RESOURCE_STATES after);
 
 	void clear_gpu_heaps();
 
@@ -985,8 +956,28 @@ public:
 		D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_handle = nullptr);
 
 	void render(renderscene& scene, const contentman& contentman);
-	void dispatch_skinning(renderscene& scene, const contentman& cman);
-	void render_shadows(renderscene& scene, const contentman& contentman);
+
+	struct meshbatch_filter final
+	{
+		enum flags
+		{
+			none,
+			fl_shader_equal = (1 << 0),
+			fl_shader_nequal = (1 << 1),
+			fl_mesh_equal = (1 << 2),
+			fl_mesh_nequal = (1 << 3)
+		};
+		shader::slot m_shader;
+		mesh_id m_mesh;
+		uint32 m_flags = 0u;
+
+		meshbatch_filter& shader_equal(const shader::slot shader) {
+			m_shader = shader;
+			m_flags |= fl_shader_equal;
+			return *this;
+		}
+	};
+	void render_meshbatches(renderscene& scene, const contentman& contentman, const meshbatch_filter& filter = {});
 
 	result<descriptor> create_resource_descriptor(dxresource& resource, const descriptor::builder& builder);
 	result<descriptor> create_resource_descriptor(gpu_resource& resource, const descriptor::builder& builder)
@@ -995,6 +986,8 @@ public:
 	}
 
 	result<> register_window(void* platform_handle);
+
+	result<gpu_resource*> gpu_resource_with_fallback(gpu_resource& resource);
 
 private:
 	void process_scene_instances(renderscene& scene, const contentman& cman);

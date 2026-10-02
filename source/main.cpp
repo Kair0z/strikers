@@ -10,7 +10,7 @@ using namespace strikers;
 extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 619; }
 extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\"; }
 
-command cm_log_fps("log_fps", "1");
+command cm_log_fps("log_fps", "0");
 command cm_log_clear("log_clear", "0", command::flags::oneshot);
 
 int main()
@@ -66,8 +66,10 @@ int main()
         if (cm_log_fps.get_value() > 0)
         {
             const float fps = 1.0f / delta_seconds;
-            if (fps > 30) logman::color(logcolor::green, 1);
+
+            logman::color(fps > 30 ? logcolor::green : logcolor::white);
             logman::log("[fps] {}", 1.0f / delta_seconds);
+            logman::prev_color();
         }
 
         if (cm_log_clear.get_value() > 0)

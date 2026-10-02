@@ -1,14 +1,16 @@
 [team_left]
-cb = luigi;
-lw = luigi;
-rw = luigi;
-cap = luigi;
+cb = yoshi;
+lw = yoshi;
+rw = yoshi;
+cap = yoshi;
+goal = kritter;
 
 [team_right]
-cb = toad;
-lw = toad;
-rw = toad;
-cap = mario;
+cb = yoshi;
+lw = yoshi;
+rw = yoshi;
+cap = yoshi;
+goal = kritter;
 
 [yoshi]
 speed = 5;

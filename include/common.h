@@ -13,6 +13,7 @@
 #include <optional>
 #include <chrono>
 #include <stdlib.h>
+#include <bit>
 
 // windows
 #if DF_WINDOWS
@@ -75,6 +76,10 @@ static constexpr _t k_invalid = (_t)-1;
 template <typename _t>
 static constexpr bool is_valid(const _t& val) { return val != k_invalid<_t>; }
 
+static constexpr uint32 bit_index(uint32 value_with_bit)
+{
+	return std::countr_zero(value_with_bit);
+}
 static constexpr uint32 min(const uint32 a, const uint32 b)
 {
 	return a < b ? a : b;
@@ -155,7 +160,7 @@ using uint4 = glm::uvec4;
 using float2 = glm::fvec2;
 using float3 = glm::fvec3;
 using float4 = glm::fvec4;
-using float4x4 = glm::mat4;
+using float4x4 = mat4x4;
 using rotation = glm::quat;
 using color = float4;
 
@@ -169,6 +174,19 @@ inline float2 lerp(const float2& a, const float2& b, float t)
 	return float2(
 		lerp(a.x, b.x, t),
 		lerp(a.x, b.x, t)
+	);
+}
+inline float remap(float value, float a_min, float a_max, float b_min, float b_max, float power = 1.0f)
+{
+	float t = (value - a_min) / (a_max - a_min);
+	t = glm::pow(t, power);
+	return b_min + t * (b_max - b_min);
+}
+inline float2 remap(const float2& value, float a_min, float a_max, float b_min, float b_max, float power = 1.0f)
+{
+	return float2(
+		remap(value.x, a_min, a_max, b_min, b_max, power),
+		remap(value.y, a_min, a_max, b_min, b_max, power)
 	);
 }
 
@@ -201,90 +219,31 @@ struct rect
 {
 	float4 m_min_max;
 };
-struct box
+
+struct light final
 {
-	float3 m_position;
-	float3 m_min;
-	float3 m_max;
-
-	box() = default;
-
-	static box unit(float scale = 1.0f)
+	enum type
 	{
-		static box unitbox{};
-		unitbox.m_min = -float3(1,1,1) * 0.5f * scale;
-		unitbox.m_max = float3(1, 1, 1) * 0.5f * scale;
-		unitbox.m_position = { 0,0,0 };
-		return unitbox;
-	}
+		point,
+		directional,
+		cone,
+		num
+	};
 
-	void grow_to_fit(const float3 point)
-	{
-		const float3 rel_point = point - m_position;
-		m_min.x = glm::min(m_min.x, rel_point.x);
-		m_min.y = glm::min(m_min.y, rel_point.y);
-		m_min.z = glm::min(m_min.z, rel_point.z);
-		m_max.x = glm::max(m_max.x, rel_point.x);
-		m_max.y = glm::max(m_max.y, rel_point.y);
-		m_max.z = glm::max(m_max.z, rel_point.z);
-	}
-
-	float3 abs_min() const
-	{
-		return m_position + m_min;
-	}
-	float3 abs_max() const
-	{
-		return m_position + m_max;
-	}
+	type m_type;
+	float3 m_color_diffuse;
+	float3 m_color_ambient;
+	float3 m_color_specular;
+	string m_name;
 };
 
-struct collision final
+struct camera final
 {
-	bool m_collided;
-	float3 m_intersection_depth;
-	float3 m_collision_normal;
-
-	static bool calculate(const box& a, const box& b, collision* out_collision_info)
-	{
-		const float3& min_a = a.abs_min();
-		const float3& max_a = a.abs_max();
-		const float3& min_b = b.abs_min();
-		const float3& max_b = b.abs_max();
-
-		const float3 intersection_depth = {
-			glm::min(max_a.x - min_b.x, max_b.x - min_a.x),
-			glm::min(max_a.y - min_b.y, max_b.y - min_a.y),
-			glm::min(max_a.z - min_b.z, max_b.z - min_a.z)
-		};
-
-		const bool collided = intersection_depth.x > 0.0f &&
-			intersection_depth.y > 0.0f &&
-			intersection_depth.z > 0.0f;
-
-		if (out_collision_info)
-		{
-			const float3 center_delta = (min_a + max_a) - (min_b + max_b);
-
-			(*out_collision_info).m_collided = collided;
-			(*out_collision_info).m_intersection_depth = intersection_depth;
-			(*out_collision_info).m_collision_normal = float3(
-				intersection_depth.x <= intersection_depth.y && intersection_depth.x <= intersection_depth.z ? glm::sign(center_delta.x) : 0.0f,
-				intersection_depth.y <= intersection_depth.x && intersection_depth.y <= intersection_depth.z ? glm::sign(center_delta.y) : 0.0f,
-				intersection_depth.z <= intersection_depth.x && intersection_depth.z <= intersection_depth.y ? glm::sign(center_delta.z) : 0.0f
-			);
-		}
-
-		return collided;
-	}
-	
-	collision inverted() const
-	{
-		collision result = *this;
-		result.m_collision_normal = -result.m_collision_normal;
-		result.m_intersection_depth = -result.m_intersection_depth;
-		return result;
-	}
+	float m_aspect_ratio;
+	float m_clip_far;
+	float m_clip_near;
+	float m_fov_vertical;
+	float m_ortho_width;
 };
 
 static mat4x4 calculate_view_mat(const mat4x4& camera_transform)
@@ -297,7 +256,7 @@ static mat4x4 calculate_perspective_proj_mat(
 	const float plane_near, 
 	const float plane_far)
 {
-	return glm::perspectiveLH_ZO(
+	return glm::perspectiveRH_ZO(
 		fov,
 		aspect,
 		plane_near,
@@ -308,7 +267,7 @@ static mat4x4 calculate_orthographic_proj_mat(
 	const float2& bottom_top,
 	const float2& near_far)
 {
-	return glm::orthoLH_ZO(
+	return glm::orthoRH_ZO(
 		left_right.x,
 		left_right.y,
 		bottom_top.x,
@@ -319,11 +278,11 @@ static mat4x4 calculate_orthographic_proj_mat(
 
 static rotation make_look_rotation(const float3& forward, const float3& up = {0,1,0})
 {
-	return glm::quatLookAtLH(glm::normalize(forward), up);
+	return glm::quatLookAtRH(glm::normalize(forward), up);
 }
 static mat4x4 calculate_transform(const float3& position, const float3& lookAt, const float3& up = { 0,1,0 })
 {
-	mat4x4 view = glm::lookAtLH(position, lookAt, up);
+	mat4x4 view = glm::lookAtRH(position, lookAt, up);
 	return glm::inverse(view);
 }
 static mat4x4 calculate_transform(const float3& position, const rotation& rot, const float3& scale)
@@ -386,7 +345,7 @@ public:
 	{
 		m_matrix = glm::translate(m_matrix, delta);
 	}
-	void add_position_world(const float3& delta)
+	void add_position(const float3& delta)
 	{
 		m_matrix = glm::translate(float4x4(1), delta) * m_matrix;
 	}
@@ -490,6 +449,115 @@ public:
 	static transform identity() { return transform{ mat4x4(1) }; }
 };
 
+struct box
+{
+	float3 m_position;
+	float3 m_min;
+	float3 m_max;
+
+	box() = default;
+
+	static box unit(float scale = 1.0f)
+	{
+		static box unitbox{};
+		unitbox.m_min = -float3(1, 1, 1) * 0.5f * scale;
+		unitbox.m_max = float3(1, 1, 1) * 0.5f * scale;
+		unitbox.m_position = { 0,0,0 };
+		return unitbox;
+	}
+
+	void grow_to_fit(const float3 point)
+	{
+		const float3 rel_point = point - m_position;
+		m_min.x = glm::min(m_min.x, rel_point.x);
+		m_min.y = glm::min(m_min.y, rel_point.y);
+		m_min.z = glm::min(m_min.z, rel_point.z);
+		m_max.x = glm::max(m_max.x, rel_point.x);
+		m_max.y = glm::max(m_max.y, rel_point.y);
+		m_max.z = glm::max(m_max.z, rel_point.z);
+	}
+
+	float3 abs_min() const
+	{
+		return m_position + m_min;
+	}
+	float3 abs_max() const
+	{
+		return m_position + m_max;
+	}
+
+	// calculate the world aabb for this bounds
+	static box transformed_aabb(const strikers::box& box, const transform& trans, const float3& add_position = {})
+	{
+		const float3 corners[8] = {
+			{ box.abs_min().x, box.abs_min().y, box.abs_min().z },
+			{ box.abs_max().x, box.abs_min().y, box.abs_min().z },
+			{ box.abs_max().x, box.abs_max().y, box.abs_min().z },
+			{ box.abs_min().x, box.abs_max().y, box.abs_min().z },
+			{ box.abs_min().x, box.abs_min().y, box.abs_max().z },
+			{ box.abs_max().x, box.abs_min().y, box.abs_max().z },
+			{ box.abs_max().x, box.abs_max().y, box.abs_max().z },
+			{ box.abs_min().x, box.abs_max().y, box.abs_max().z },
+		};
+
+		strikers::box aabb{};
+		aabb.m_position = add_position;
+		for (uint32 i = 0u; i < 8; ++i)
+		{
+			aabb.grow_to_fit(trans.m_matrix * float4(corners[i], 1));
+		}
+		return aabb;
+	}
+};
+
+struct collision final
+{
+	bool m_collided;
+	float3 m_intersection_depth;
+	float3 m_collision_normal;
+
+	static bool calculate(const box& a, const box& b, collision* out_collision_info)
+	{
+		const float3& min_a = a.abs_min();
+		const float3& max_a = a.abs_max();
+		const float3& min_b = b.abs_min();
+		const float3& max_b = b.abs_max();
+
+		const float3 intersection_depth = {
+			glm::min(max_a.x - min_b.x, max_b.x - min_a.x),
+			glm::min(max_a.y - min_b.y, max_b.y - min_a.y),
+			glm::min(max_a.z - min_b.z, max_b.z - min_a.z)
+		};
+
+		const bool collided = intersection_depth.x > 0.0f &&
+			intersection_depth.y > 0.0f &&
+			intersection_depth.z > 0.0f;
+
+		if (out_collision_info)
+		{
+			const float3 center_delta = (min_a + max_a) - (min_b + max_b);
+
+			(*out_collision_info).m_collided = collided;
+			(*out_collision_info).m_intersection_depth = intersection_depth;
+			(*out_collision_info).m_collision_normal = float3(
+				intersection_depth.x <= intersection_depth.y && intersection_depth.x <= intersection_depth.z ? glm::sign(center_delta.x) : 0.0f,
+				intersection_depth.y <= intersection_depth.x && intersection_depth.y <= intersection_depth.z ? glm::sign(center_delta.y) : 0.0f,
+				intersection_depth.z <= intersection_depth.x && intersection_depth.z <= intersection_depth.y ? glm::sign(center_delta.z) : 0.0f
+			);
+		}
+
+		return collided;
+	}
+
+	collision inverted() const
+	{
+		collision result = *this;
+		result.m_collision_normal = -result.m_collision_normal;
+		result.m_intersection_depth = -result.m_intersection_depth;
+		return result;
+	}
+};
+
 template <typename _t> using vector = std::vector<_t>;
 template <typename _k, typename _t, typename _h = std::hash<_k>, typename _eq = std::equal_to<_k>> 
 using umap = std::unordered_map<_k, _t, _h, _eq>;
@@ -591,12 +659,18 @@ class result final
 	#define DF_CHECK_ON_MAKE 0
 	#define DF_RESULT_CHECK								\
     do {												\
-        if (m_flags == error) {							\
+        if ((m_flags & error) != 0) {					\
 			logman::color(logcolor::red);				\
             logman::log("error: {}", m_unexpected);		\
 			logman::prev_color();						\
             abort();									\
         }												\
+		else if ((m_flags & warning) != 0)				\
+		{												\
+			logman::color(logcolor::yellow);			\
+            logman::log("warning: {}", m_unexpected);	\
+			logman::prev_color();						\
+		}												\
     } while (0);
 
 	enum flags
@@ -618,13 +692,13 @@ public:
 	result(result&& other) = default;
 	result(_ex&& ex) : m_expected{ ex }, m_flags{ success } {}
 	result(const _ex& ex) : m_expected{ ex }, m_flags{ success } {}
-	result(_unex&& unex) : m_unexpected{ unex }, m_flags{ error } 
+	result(_unex&& unex, flags flgs = error) : m_unexpected{ unex }, m_flags{ flgs } 
 	{ 
 #if DF_CHECK_ON_MAKE
 		DF_RESULT_CHECK;
 #endif
 	}
-	result(const _unex& unex) : m_unexpected{ unex }, m_flags{ error } 
+	result(const _unex& unex, flags flgs = error) : m_unexpected{ unex }, m_flags{ flgs }
 	{ 
 #if DF_CHECK_ON_MAKE
 		DF_RESULT_CHECK;
@@ -637,7 +711,7 @@ public:
 	_ex& claim()
 	{
 #if DF_CHECK_ON_CLAIM
-		DF_RESULT_CHECK
+		DF_RESULT_CHECK;
 #endif
 		return m_expected;
 	}
@@ -645,7 +719,7 @@ public:
 	const _ex& claim() const
 	{
 #if DF_CHECK_ON_CLAIM
-		DF_RESULT_CHECK
+		DF_RESULT_CHECK;
 #endif
 			return m_expected;
 	}
@@ -655,12 +729,7 @@ public:
 	bool is_success() const { return m_flags == 0; }
 
 	static result make_success(const _ex& ex = {}) { return result(ex); }
-	static result make_fail(_unex&& unex) { return result(unex); }
-	static result make_warning(_unex&& unex)
-	{
-		result res{ unex };
-		res.m_flags = warning;
-		return res;
-	}
+	static result make_fail(_unex&& unex) { return result(unex, error); }
+	static result make_warning(_unex&& unex) { return result(unex, warning); }
 };
 }

@@ -37,6 +37,7 @@ project "strikers"
     }
     includedirs {
         includeDir,
+        "../hlsl/",
         "../thirdparty/glm/include",
         "../thirdparty/assimp/include",
         "../thirdparty/pix/include",

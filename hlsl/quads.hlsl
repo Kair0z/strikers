@@ -7,13 +7,8 @@
     "CBV(b1),"\
     "SRV(t0)"
 
-struct instance
-{
-    float4x4 transform;
-    float4 color;
-    float4 rect_uv;
-    uint texid_color;
-};
+#include "frontend.hlsl"
+
 struct ps_input
 {
     float4 position         : SV_POSITION;
@@ -22,23 +17,14 @@ struct ps_input
     uint texid_color      : TEXCOORD1;
 };
 
-cbuffer cbuffer_global : register(b0)
-{
-    float4x4 k_mat_to_lightspace;
-    float4 k_light_color;
-    float4 k_light_direction;
-    uint k_texid_shadows;
-};
-cbuffer cbuffer_view : register(b1)
-{
-    float4x4 k_viewprojection;
-};
-StructuredBuffer<instance> t_instances : register(t0);
+ConstantBuffer<cbuffer_global>  c_global    : register(b0);
+ConstantBuffer<cbuffer_view>    c_view      : register(b1);
+StructuredBuffer<quad_instance> t_instances : register(t0);
 
 [Shader("vertex")]
 ps_input main_vs(uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
 {
-    instance inst = t_instances[instance_id];
+    quad_instance inst = t_instances[instance_id];
     const float2 rect_uv_min = inst.rect_uv.xy;
     const float2 rect_uv_max = float2(1,1) - inst.rect_uv.zw;
     ps_input output;
@@ -62,7 +48,7 @@ ps_input main_vs(uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
         output.uv       = float2(rect_uv_min.x,rect_uv_max.y);
     
     output.position = mul(inst.transform, output.position);
-    output.position = mul(k_viewprojection, output.position);
+    output.position = mul(c_view.viewprojection, output.position);
     output.color = inst.color;
     output.texid_color = inst.texid_color;
     return output;

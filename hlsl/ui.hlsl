@@ -1,31 +1,19 @@
+#include "frontend.hlsl"
+
 // define BINDLESS root signature
 #define ROOT_SIGNATURE \
     "RootFlags("\
         "CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED|"\
         "SAMPLER_HEAP_DIRECTLY_INDEXED),"\
-    "CBV(b0),"\
     "SRV(t0)"
 
-struct instance
-{
-    float4 rect;
-    uint texture_heap_id;
-};
-struct vs_input
-{
-    uint vertex_id : SV_VertexID;
-};
 struct ps_input
 {
     float4 position         : SV_POSITION;
     float2 uv               : TEXCOORD0;
     uint texture_heap_id    : TEXCOORD1;
 };
-
-cbuffer constants : register(b0)
-{
-};
-StructuredBuffer<instance> t_instances : register(t0);
+StructuredBuffer<ui_instance> t_instances : register(t0);
 
 [Shader("vertex")]
 ps_input main_vs(uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)

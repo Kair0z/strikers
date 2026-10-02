@@ -45,6 +45,11 @@ void transman::resolve_graph(trans_id root)
 	}, root);
 }
 
+transform transman::trs_to_transform(const trs& trans)
+{
+	return transform::build(trans.m_position, trans.m_rotation, trans.m_scale);
+}
+
 void transman::resolve_parents(trans_id id)
 {
 	trans_id parent = m_graph.parent(id);
@@ -69,6 +74,8 @@ void transman::resolve_parents(trans_id id)
 			current_entry.m_trs_world.m_position = transform_position(parent_entry.m_trs_world, current_entry.m_trs_local.m_position);
 		}
 		current_entry.m_trs_world_inv = current_entry.m_trs_world.get_inverse();
+		current_entry.m_transform_local = trs_to_transform(current_entry.m_trs_local);
+		current_entry.m_transform_world = trs_to_transform(current_entry.m_trs_world);
 	}
 	current_entry.m_world_dirty = false;
 }
@@ -88,6 +95,13 @@ void transman::reset()
 	{
 		entry.data().m_trs_local = entry.data().m_trs_local_reset;
 	}
+	resolve_graph();
+}
+
+void transman::reset(trans_id id)
+{
+	auto& entry = m_graph.get(id).data();
+	entry.m_trs_local = entry.m_trs_local_reset;
 	resolve_graph();
 }
 
@@ -155,7 +169,8 @@ transform transman::get_transform(trans_id id, space spc)
 	return transform::build(
 		get_position(id, spc),
 		get_rotation(id, spc),
-		get_scale(id, spc));
+		get_scale(id, spc)
+	);
 }
 
 float3 transman::get_position(trans_id id, space spc)

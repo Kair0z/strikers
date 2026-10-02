@@ -14,7 +14,6 @@ enum class asset_type
 	skeleton,
 	animation,
 	material,
-	camera,
 	num
 };
 
@@ -28,33 +27,40 @@ struct none_asset final
 	int none;
 };
 
-struct camera_asset final
-{
-	camera_id m_camera_id;
-	string m_name;
-	float4x4 m_scene_transform;
-	float m_aspect_ratio;
-	float m_clip_far;
-	float m_clip_near;
-	float m_fov_horizontal;
-	float m_ortho_width;
-};
-
 struct scene_asset final
 {
 	scene_id m_scene_id{};
 	struct node final
 	{
 		string m_name;
-		float4x4 m_local_transform; // local transform in parent space
-		float4x4 m_scene_transform; // scene space -> model space
-		float4x4 m_scene_transform_inv; // scene space -> model space
+		transform m_local_transform; // local transform in parent space
+		transform m_scene_transform; // scene space -> model space
+		transform m_scene_transform_inv; // scene space -> model space
 		vector<mesh_id> m_meshes{};
 	};
 	using nodegraph = flatgraph<node>;
 	nodegraph m_graph;
 
-	vector<camera_id> m_cameras;
+	vector<camera> m_cameras{};
+	vector<light> m_lights{};
+	umap<string, uint32> m_name_to_node_idx;
+	umap<uint32, uint32> m_camera_to_node_idx;
+	umap<uint32, uint32> m_light_to_node_idx;
+	umap<uint32, uint32> m_node_to_camera_idx;
+	umap<uint32, uint32> m_node_to_light_idx;
+
+	bool find_node_by_name(const string& name, uint32& out_node_idx) const
+	{
+		if (m_name_to_node_idx.contains(name))
+		{
+			out_node_idx = m_name_to_node_idx.at(name);
+			return true;
+		}
+		else
+		{
+			return false;
+		}
+	}
 
 	bool find_node_with_mesh(const mesh_id& mesh, uint32& out_node_idx)
 	{
@@ -154,6 +160,7 @@ struct skeleton_asset final
 		float4x4 m_mat_transform;
 		bool m_valid_parent = false;
 	};
+	string m_name;
 	skel_id m_skeleton_id = k_id_invalid;
 	vector<bone> m_bones{};
 	umap<string, uint32> m_name_to_bone_idx{};
@@ -186,6 +193,7 @@ struct animation_asset final
 		vector<keyframe<float4>> m_rotation_keys; // float4 -> quaternion
 	};
 
+	string m_name;
 	uset<skel_id> m_compatible_skeletons;
 	anim_id m_animation_id;
 	vector<channel> m_channels{};
@@ -210,8 +218,7 @@ class contentman final
 		image_asset,
 		skeleton_asset,
 		animation_asset,
-		material_asset,
-		camera_asset>>;
+		material_asset>>;
 	template <asset_type _t>
 	using asset_id_t = std::tuple_element_t<static_cast<uint64>(_t), std::tuple<
 		uint64,
@@ -220,8 +227,7 @@ class contentman final
 		image_id,
 		skel_id,
 		anim_id,
-		mat_id,
-		camera_id>>;
+		mat_id>>;
 
 	template <asset_type _t>
 	struct typed_assets final
@@ -236,7 +242,6 @@ class contentman final
 	typed_assets<asset_type::skeleton> m_skeleton_assets;
 	typed_assets<asset_type::animation> m_animation_assets;
 	typed_assets<asset_type::material> m_material_assets;
-	typed_assets<asset_type::camera> m_camera_assets;
 
 	template <asset_type _t>
 	const typed_assets<_t>& get_typed_assets() const
@@ -247,7 +252,6 @@ class contentman final
 		else if constexpr (_t == asset_type::skeleton) return m_skeleton_assets;
 		else if constexpr (_t == asset_type::animation) return m_animation_assets;
 		else if constexpr (_t == asset_type::material) return m_material_assets;
-		else if constexpr (_t == asset_type::camera) return m_camera_assets;
 		else return m_none_assets;
 	}
 	template <asset_type _t>
@@ -259,7 +263,6 @@ class contentman final
 		else if constexpr (_t == asset_type::skeleton) return m_skeleton_assets;
 		else if constexpr (_t == asset_type::animation) return m_animation_assets;
 		else if constexpr (_t == asset_type::material) return m_material_assets;
-		else if constexpr (_t == asset_type::camera) return m_camera_assets;
 		else return m_none_assets;
 	}
 
@@ -403,9 +406,6 @@ public:
 
 	mesh_asset const* find_mesh(const mesh_id id) const {
 		return find_typed_asset<asset_type::mesh>(id).claim();
-	}
-	camera_asset const* find_camera(const camera_id id) const {
-		return find_typed_asset<asset_type::camera>(id).claim();
 	}
 	material_asset const* find_material(const mat_id id) const {
 		return find_typed_asset<asset_type::material>(id).claim();

@@ -11,7 +11,7 @@ public:
 	bool parse_font(
 		contentman& cman,
 		const stringview& filepath, 
-		const char character,
+		const char character_runner,
 		image_id& out_image,
 		rect& out_rect_uv) const;
 };

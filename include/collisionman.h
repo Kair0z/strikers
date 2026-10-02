@@ -93,7 +93,7 @@ namespace strikers
 			return m_response_matrix[(layer_b * collision_layers::num) + layer_a].m_response;
 		}
 
-		void reset_colliders()
+		void reset_collisions()
 		{
 			m_collisions.clear();
 			m_collider_to_collisions.clear();

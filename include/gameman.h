@@ -13,7 +13,23 @@ class fontman;
 class gameman final
 {
 	// per character info
-	struct character final
+	struct character_goalie final
+	{
+		enum type
+		{
+			kritter,
+			num
+		};
+		static const char* get_name(uint32 tpe)
+		{
+			static const char* k_names[]
+			{
+				"kritter"
+			};
+			return k_names[tpe];
+		}
+	};
+	struct character_runner final
 	{
 		enum type
 		{
@@ -61,13 +77,13 @@ class gameman final
 			return k_names[slt];
 		}
 
-		character::type m_character;
+		character_runner::type m_character;
 		bool m_active = true;
 		actor_id m_actor = k_actor_invalid;
 		transform m_start_transform;
 	};
 
-	// each game always has 2 teams (football)
+	// each game always has 2 teams
 	struct team final
 	{
 		enum slot
@@ -86,7 +102,7 @@ class gameman final
 			return k_names[slt];
 		}
 
-		actor_id m_goal_actor;
+		actor_id m_goal_actor = k_actor_invalid;
 		float m_action_cooldown_timer = 0.0f;
 
 		bool action_on_cooldown() const
@@ -99,27 +115,32 @@ class gameman final
 		}
 	};
 
+	// each team has 1 goalie
 	struct goalie final
 	{
-		actor_id m_actor;
+		character_goalie::type m_character;
+		actor_id m_actor = k_actor_invalid;
+		transform m_start_transform;
 	};
 
-	// each game can host up to 2 players
+	// each game can host up to 4 players (actual persons)
 	struct player final
 	{
 		enum slot
 		{
 			one,
 			two,
+			three,
+			four,
 			num
 		};
 
-		team::slot m_team_idx;
+		uint32 m_team_idx;
+		uint32 m_current_local_runner = runner::captain;
 		bool m_active = false;
-		uint32 m_current_local_runner = (uint32)runner::captain;
 	};
 
-	// the ball state
+	// each game has only 1 ball
 	struct ball final
 	{
 		enum state
@@ -153,13 +174,26 @@ class gameman final
 			float m_seconds_since_start;
 		} m_charge;
 		
-		actor_id m_actor;
+		actor_id m_actor = k_actor_invalid;
 		state m_state;
 	};
 
+	// the state of the pitch
 	struct field final
 	{
-		actor_id m_midpoint_actor;
+		actor_id m_midpoint_actor = k_actor_invalid;
+		actor_id m_pitch_bounds_actor = k_actor_invalid;
+		box m_pitch_bounds;
+
+		float2 normalize_position(const float3& position) const
+		{
+			const float3 field_min = m_pitch_bounds.abs_min();
+			const float3 field_max = m_pitch_bounds.abs_max();
+			return float2(
+				remap(position.x, field_min.x, field_max.x, 0, 1),
+				remap(position.z, field_min.z, field_max.z, 0, 1)
+			);
+		}
 	};
 
 	player m_players[player::num];
@@ -167,15 +201,35 @@ class gameman final
 	goalie m_goalies[team::num];
 	runner m_runners[team::num * runner::num];
 	ball m_ball;
-	umap<actor_id, uint32> m_actor_to_runner_idx;
 	field m_field;
 
-	uint32 get_global_runner_idx(uint32 team_slot, uint32 runner_slot) const { return (team_slot * runner::num) + runner_slot; }
+	umap<actor_id, uint32> m_actor_to_runner_idx;
+	umap<actor_id, uint32> m_actor_to_goalie_idx;
+
+	struct main_camera final
+	{
+		actor_id m_actor = k_actor_invalid;
+		float3 m_velocity;
+		float3 m_initial_right;
+		float3 m_movement_input;
+		float2 m_orient_input;
+		float m_sprint;
+		camera m_camera;
+	};
+	main_camera m_camera;
+
+	struct lights final
+	{
+		actor_id m_actor_directional;
+	};
+	lights m_lights{};
+
+	uint32 get_runner_idx(uint32 team_slot, uint32 runner_slot) const { return (team_slot * runner::num) + runner_slot; }
 	uint32 runner_get_team_idx(uint32 runner_idx) const { return runner_idx / runner::num; }
 	uint32 runner_get_local_idx(uint32 runner_idx) const { return runner_idx % runner::num; }
 	runner& get_runner_in_global(uint32 global_idx) { return m_runners[global_idx]; }
-	runner& get_runner_in_team(uint32 team_idx, uint32 local_idx) { return get_runner_in_global(get_global_runner_idx(team_idx, local_idx)); }
-	
+	runner& get_runner_in_team(uint32 team_idx, uint32 local_idx) { return get_runner_in_global(get_runner_idx(team_idx, local_idx)); }
+
 	void runner_start_dribble(uint32 runner_idx)
 	{
 		m_ball.m_state = ball::state::dribble;
@@ -231,7 +285,6 @@ class gameman final
 			m_ball.m_charge.m_seconds_since_start = 0.0f;
 		}
 	}
-
 	bool runner_can_pass(uint32 runner_idx) const
 	{
 		const uint32 team_idx = runner_get_team_idx(runner_idx);
@@ -284,23 +337,15 @@ class gameman final
 	{
 		return (position.x > actor(m_field.m_midpoint_actor).get_position().x) ? 0 : 1;
 	}
-
-private:
-	struct camera
+	uint32 count_active_players() const
 	{
-		camera_id m_asset_id;
-		transform m_transform;
-		transform m_transform_original;
-		float3 m_velocity;
-	};
-	camera m_camera;
-
-	struct light
-	{
-		transform m_transform;
-		float4 m_color;
-	};
-	light m_light;
+		uint32 count = 0u;
+		for (uint32 i = 0u; i < player::num; ++i)
+		{
+			count += m_players[i].m_active;
+		}
+		return count;
+	}
 
 public:
 	void start(const contentman& cman);
@@ -334,8 +379,6 @@ public:
 	}
 
 private:
-	void assemble_fbx_scene(const contentman& cman, const stringview& filepath);
-
 	struct reset
 	{
 		enum flags
@@ -348,41 +391,9 @@ private:
 	};
 	void reset(reset::flags flags);
 
-	template <component::type _t>
-	using component_array = vector<component_t<_t>>;
-	struct
-	{
-		component_array<component::type::physics> m_physics;
-		component_array<component::type::bounds> m_bounds;
-		component_array<component::type::render> m_renders;
-		component_array<component::type::renderui> m_renderuis;
-		component_array<component::type::movement> m_movements;
-		component_array<component::type::brain> m_brains;
-	} m_components;
-	template <component::type _t>
-	component_array<_t>& components()
-	{
-		if constexpr (_t == component::type::physics) return m_components.m_physics;
-		else if constexpr (_t == component::type::bounds) return m_components.m_bounds;
-		else if constexpr (_t == component::type::render) return m_components.m_renders;
-		else if constexpr (_t == component::type::renderui) return m_components.m_renderuis;
-		else if constexpr (_t == component::type::movement) return m_components.m_movements;
-		else if constexpr (_t == component::type::brain) return m_components.m_brains;
-	}
-	template <component::type _t>
-	const component_array<_t>& components() const
-	{
-		if constexpr (_t == component::type::physics) return m_components.m_physics;
-		else if constexpr (_t == component::type::bounds) return m_components.m_bounds;
-		else if constexpr (_t == component::type::render) return m_components.m_renders;
-		else if constexpr (_t == component::type::renderui) return m_components.m_renderuis;
-		else if constexpr (_t == component::type::movement) return m_components.m_movements;
-		else if constexpr (_t == component::type::brain) return m_components.m_brains;
-	}
-
+	component_collection m_components;
 	transman m_transman;
 	collisionman m_collisionman;
-	umap<string, actor_id> m_name_to_actor{};
 
 	actor_id create_actor(const actor_id parent = k_actor_invalid)
 	{
@@ -390,7 +401,6 @@ private:
 		actor_id new_id = (actor_id)m_actors.size() - 1;
 		actor_entry& new_actor = m_actors[new_id];
 
-		// add a transform
 		if (parent == k_actor_invalid)
 		{
 			new_actor.m_transform_id = m_transman.add_world_transform(transform::identity());
@@ -460,7 +470,8 @@ private:
 		const actor_scope& add_position(const float3& delta, space spc) const;
 		const actor_scope& add_rotation(const rotation& delta, space spc) const;
 		const actor_scope& multiply_scale(const float3& multiplier, space spc) const;
-		
+		const actor_scope& reset_transform() const;
+
 		bool has_component(component::type type) const {
 			return m_owner.get_actor(m_id).has_component(type);
 		}
@@ -516,7 +527,11 @@ private:
 			m_owner.components<_t>().clear_owner();
 		}
 	};
-
 	actor_scope actor(actor_id id) { return actor_scope(*this, id); }
+
+	template <component::type _t>
+	component_collection::component_array<_t>& components() { return m_components.components<_t>(); }
+	template <component::type _t>
+	const component_collection::component_array<_t>& components() const { return m_components.components<_t>(); }
 };
 }

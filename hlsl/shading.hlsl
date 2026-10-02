@@ -9,30 +9,8 @@
     "SRV(t0),"\
     "SRV(t1)"
 
-static const int k_invalid = -1;
+#include "frontend.hlsl"
 
-struct instance
-{
-    float4x4    transform;
-    float4      color;
-    int         bone_instance_offset;
-    int         texid_basecolor;
-};
-struct bone_instance
-{
-    uint bone_index;
-    int anim_index;
-    float anim_time; // normalized (not seconds)
-    float4x4 skinned_matrix;
-};
-struct vs_input
-{
-    float3 position : SV_POSITION;
-    float3 normal : NORMAL;
-    float2 uv : TEXCOORD0;
-    uint4 bone_ids : BLENDINDICES0;
-    float4 bone_weights : BLENDWEIGHT0;
-};
 struct ps_input
 {
     float4 position_cs : SV_POSITION;
@@ -42,40 +20,30 @@ struct ps_input
     float2 uv : TEXCOORD0;
     int texid_basecolor : TEXCOORD1;
 };
-cbuffer cbuffer_global : register(b0)
-{
-    float4x4 k_mat_to_lightspace;
-    float4 k_light_color;
-    float4 k_light_direction;
-    int k_texid_shadows;
-};
-cbuffer cbuffer_view : register(b1)
-{
-    float4x4 k_viewprojection;
-};
-StructuredBuffer<instance>          t_instances         : register(t0);
+ConstantBuffer<cbuffer_global>      c_global            : register(b0);
+ConstantBuffer<cbuffer_view>        c_view              : register(b1);
+StructuredBuffer<mesh_instance>     t_instances         : register(t0);
 StructuredBuffer<bone_instance>     t_bone_instances    : register(t1);
 
 [Shader("vertex")]
-ps_input main_vs(vs_input input, uint instance_id : SV_InstanceID, uint start_instance_id : SV_StartInstanceLocation, uint vertex_id : SV_VertexID)
+ps_input main_vs(mesh_vertex input, uint instance_id : SV_InstanceID, uint start_instance_id : SV_StartInstanceLocation, uint vertex_id : SV_VertexID)
 {
     ps_input output;
-    instance instance = t_instances[instance_id + start_instance_id];
+    mesh_instance instance = t_instances[instance_id + start_instance_id];
      
     float4 position_os = float4(input.position.xyz, 1);
     if (instance.bone_instance_offset != k_invalid)
     {        
-        const float4 skinned_position = 
-            input.bone_weights.x * mul(t_bone_instances[instance.bone_instance_offset + input.bone_ids.x].skinned_matrix, float4(position_os.xyz, 1)) +
-            input.bone_weights.y * mul(t_bone_instances[instance.bone_instance_offset + input.bone_ids.y].skinned_matrix, float4(position_os.xyz, 1)) +
-            input.bone_weights.z * mul(t_bone_instances[instance.bone_instance_offset + input.bone_ids.z].skinned_matrix, float4(position_os.xyz, 1)) +
-            input.bone_weights.w * mul(t_bone_instances[instance.bone_instance_offset + input.bone_ids.w].skinned_matrix, float4(position_os.xyz, 1));
-        
-        position_os = skinned_position;
+        position_os = calculate_skinned_position(
+            t_bone_instances,
+            position_os.xyz,
+            instance.bone_instance_offset,
+            input.bone_ids,
+            input.bone_weights);
     }
 
     output.position_ws = mul(instance.transform, float4(position_os.xyz, 1));
-    output.position_cs = mul(k_viewprojection, float4(output.position_ws.xyz, 1));
+    output.position_cs = mul(c_view.viewprojection, float4(output.position_ws.xyz, 1));
 
     output.color = instance.color;
     output.normal_ws = normalize(mul((float3x3)instance.transform, input.normal));
@@ -87,13 +55,13 @@ ps_input main_vs(vs_input input, uint instance_id : SV_InstanceID, uint start_in
 float shadow_term(float3 position_ws, float3 normal_ws)
 {
     static const float k_no_shadow = 1.0f;
-    if (k_texid_shadows == k_invalid) 
+    if (c_global.texid_shadows == k_invalid) 
         return k_no_shadow;
 
-    if (dot(normal_ws, k_light_direction.xyz) > 0.0f) 
+    if (dot(normal_ws, c_global.light_direction.xyz) > 0.0f) 
         return k_no_shadow; 
 
-    float4 shadowmap_position = mul(k_mat_to_lightspace, float4(position_ws.xyz, 1.0f));
+    float4 shadowmap_position = mul(c_global.mat_to_lightspace, float4(position_ws.xyz, 1.0f));
     shadowmap_position.xyz /= shadowmap_position.w;
     
     const float2 shadowmap_uv = shadowmap_position.xy * float2(1,-1) * 0.5 + 0.5;
@@ -102,9 +70,10 @@ float shadow_term(float3 position_ws, float3 normal_ws)
         || shadowmap_uv.x < 0.0f
         || shadowmap_uv.y < 0.0f;
     
-    if (out_of_bounds) return k_no_shadow;
+    if (out_of_bounds) 
+        return k_no_shadow;
 
-    Texture2D tex_shadows = ResourceDescriptorHeap[k_texid_shadows];
+    Texture2D tex_shadows = ResourceDescriptorHeap[c_global.texid_shadows];
     uint width, height, num_levels;
     tex_shadows.GetDimensions(0, width, height, num_levels);
 
@@ -117,7 +86,7 @@ float shadow_term(float3 position_ws, float3 normal_ws)
 float4 main_ps(ps_input input) : SV_Target0
 {
     const float3 normal_ws = input.normal_ws;
-    const float3 ndotl = dot(normal_ws, normalize(k_light_direction.xyz));
+    const float3 ndotl = dot(normal_ws, normalize(c_global.light_direction.xyz));
     const float3 ambient = float3(1, 1, 1) * 0.05;
     const float3 diffuse = clamp(-ndotl, 0.2, 1);
     const float shadow = shadow_term(input.position_ws, normal_ws);

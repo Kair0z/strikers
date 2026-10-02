@@ -9,8 +9,11 @@
 #include "stb_image.h"
 
 #include "logman.h"
+#include "commandman.h"
 
 namespace strikers {
+
+command cm_log_content("log_content", "0");
 
 bool find_file(const stringview& directory, const stringview& filename, string& out_filepath)
 {
@@ -66,6 +69,16 @@ float4x4 to_glm(const aiMatrix4x4& mat)
     return result;
 }
 
+float3 to_glm(const aiVector3D& vec)
+{
+    return float3(vec.x, vec.y, vec.z);
+}
+
+float3 to_glm(const aiColor3D& col)
+{
+    return float3(col.r, col.g, col.b);
+}
+
 result<asset_id> contentman::load_assimp_file(const stringview& filepath)
 {
     using restype = result<asset_id>;
@@ -87,7 +100,6 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
     {
         Assimp::Importer assimp{};
         int flags =
-            // aiProcess_PreTransformVertices |
             aiProcess_CalcTangentSpace |
             aiProcess_Triangulate |
             aiProcess_JoinIdenticalVertices |
@@ -95,118 +107,12 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             aiProcess_SortByPType;
         const aiScene* scene = assimp.ReadFile(string(filepath), flags);
 
-        // list all camera-names that want to know their scene_transform (this is necessary because assimp is crazy)
-        umap<string, float4x4*> camera_name_to_node_scene_transform{};
-        vector<camera_id> camera_ids{};
-        for (uint32 i = 0u; i < scene->mNumCameras; ++i)
-        {
-            const auto& camera = scene->mCameras[i];
-            camera_name_to_node_scene_transform[camera->mName.C_Str()] = nullptr;
-            camera_ids.push_back(make_camera_id(filepath, i));
-        }
-
-        // parse & traverse scene
+        // start building the entire scene
         const scene_id sc_id = make_scene_id(filepath);
         scene_asset sc_asset{};
-        {
-            // traverse the entire scene hierarchy
-            func<void(const aiNode&, uint32, const float4x4&)> traverse_node;
-            static constexpr uint32 k_invalid = (uint32)-1;
-            traverse_node = [&traverse_node, &sc_asset, &filepath, &camera_name_to_node_scene_transform]
-            (const aiNode& current_node, uint32 parent, const float4x4& parent_scene_transform)
-            {
-                flatgraph<scene_asset::node>& graph = sc_asset.m_graph;
-                uint32 current_node_idx = parent == k_invalid ? graph.add_node({}, graph.k_root) : graph.add_node({}, parent);
-                scene_asset::node& current_data = graph.get(current_node_idx).data();
-
-                // parse this node
-                const float4x4& local_transform = to_glm(current_node.mTransformation);
-                const float4x4 scene_transform = local_transform * parent_scene_transform;
-                current_data.m_local_transform = local_transform;
-                current_data.m_scene_transform = scene_transform;
-                current_data.m_scene_transform_inv = glm::inverse(current_data.m_scene_transform);
-
-                const uint32 num_meshes = current_node.mNumMeshes;
-                current_data.m_meshes.resize(num_meshes);
-                for (uint32 i = 0u; i < num_meshes; ++i)
-                {
-                    current_data.m_meshes[i] = make_mesh_id(filepath, current_node.mMeshes[i]);
-                }
-
-                current_data.m_name = string(current_node.mName.C_Str());
-                
-                auto found = camera_name_to_node_scene_transform.find(current_data.m_name);
-                if (found != camera_name_to_node_scene_transform.cend())
-                {
-                    camera_name_to_node_scene_transform[current_data.m_name] = new float4x4(scene_transform);
-                }
-
-                // traverse children
-                for (uint32 i = 0u; i < current_node.mNumChildren; ++i)
-                {
-                    traverse_node(*current_node.mChildren[i], current_node_idx, scene_transform);
-                }
-            };
-            traverse_node(*scene->mRootNode, k_invalid, to_glm(scene->mRootNode->mTransformation));
-
-            // allocate the scene asset
-            sc_asset.m_cameras = camera_ids;
-            allocate_asset<asset_type::scene>(sc_id, sc_asset, root_id);
-        }
-
-#if 1 // log scene graph
-        sc_asset.m_graph.traverse([&sc_asset](uint32 c, uint32 p)
-        {
-            const auto& node = sc_asset.m_graph.get(c);
-            const auto& data = sc_asset.m_graph.get(c).data();
-
-            string message = data.m_name + "[num_m:{}]";
-            for (uint32 i = 0u; i < node.get_depth(); ++i)
-                message = "  " + message;
-            logman::log(message, data.m_meshes.size());
-        }, sc_asset.m_graph.k_root, scene_asset::nodegraph::traverse_mode::depth);
-#endif
-
-        // parse cameras
-        for (uint32 i = 0u; i < scene->mNumCameras; ++i)
-        {
-            // we only add cameras of which we found a node in the scene hierarchy
-            const auto& camera = scene->mCameras[i];
-            const string camera_name = string(camera->mName.C_Str());
-
-            float4x4 camera_matrix = float4x4{ 1 }; // identity
-            float4x4* camera_scene_transform = camera_name_to_node_scene_transform[camera_name];
-            if (camera_scene_transform != nullptr)
-            {
-                // apply scene transform to the original matrix
-                aiMatrix4x4 ai_camera_matrix;
-                camera->GetCameraMatrix(ai_camera_matrix);
-                camera_matrix = to_glm(ai_camera_matrix);
-                camera_matrix = (*camera_scene_transform) * camera_matrix;;
-                delete camera_scene_transform;
-
-                // flip, this is just ugly
-                camera_matrix[0] = -camera_matrix[0];
-                camera_matrix[2] = -camera_matrix[2];
-                // camera_matrix[2][3] = -camera_matrix[2][3];
-            }
-
-            const camera_id cam_id = camera_ids[i];
-            camera_asset asset{};
-            asset.m_camera_id = cam_id;
-            asset.m_scene_transform = camera_matrix;
-            asset.m_aspect_ratio = camera->mAspect;
-            asset.m_clip_near = camera->mClipPlaneFar;
-            asset.m_clip_far = camera->mClipPlaneNear;
-            asset.m_fov_horizontal = camera->mHorizontalFOV;
-            asset.m_ortho_width = camera->mOrthographicWidth;
-            asset.m_name = string(camera->mName.C_Str());
-            allocate_asset<asset_type::camera>(cam_id, asset, root_id);
-        }
 
         // parse materials
-        auto fetch_material_first_texture = [this](const aiMaterial* material, aiTextureType type, image_id& out_id)
-        {
+        auto fetch_material_first_texture = [this](const aiMaterial* material, aiTextureType type, image_id& out_id) {
             const uint32 num_textures = aiGetMaterialTextureCount(material, type);
             if (num_textures > 0)
             {
@@ -224,6 +130,7 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             }
             else return false;
         };
+
         vector<mat_id> material_ids{};
         for (uint32 i = 0u; i < scene->mNumMaterials; ++i)
         {
@@ -234,7 +141,7 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             const mat_id material_id = make_material_id(name);
             for (uint32 p = 0u; p < material->mNumProperties; ++p)
             {
-                
+
             }
 
             aiColor4D ai_out_color{};
@@ -254,10 +161,98 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             allocate_asset<asset_type::material>(material_id, asset, root_id);
             material_ids.push_back(material_id);
         }
+        
+        // list all camera-names that want to know their scene_transform (this is necessary because assimp is crazy)
+        umap<string, uint32> camera_name_to_node_idx{};
+        umap<string, uint32> light_name_to_node_idx{};
+        for (uint32 i = 0u; i < scene->mNumCameras; ++i)
+        {
+            const auto& camera = scene->mCameras[i];
+            camera_name_to_node_idx[camera->mName.C_Str()] = 0u;
+        }
+        for (uint32 i = 0u; i < scene->mNumLights; ++i)
+        {
+            light_name_to_node_idx[scene->mLights[i]->mName.C_Str()] = 0u;
+        }
+
+        // traverse the entire scene hierarchy
+        {
+            func<void(const aiNode&, uint32, const float4x4&)> traverse_node;
+            static constexpr uint32 k_invalid = (uint32)-1;
+            traverse_node = [&traverse_node, &sc_asset, &filepath, &camera_name_to_node_idx, &light_name_to_node_idx](const aiNode& current_node, uint32 parent, const float4x4& parent_scene_transform)
+            {
+                flatgraph<scene_asset::node>& graph = sc_asset.m_graph;
+                uint32 current_node_idx = parent == k_invalid ? graph.add_node({}, graph.k_root) : graph.add_node({}, parent);
+                scene_asset::node& current_data = graph.get(current_node_idx).data();
+
+                // parse this node's transforms
+                const float4x4& local_transform = to_glm(current_node.mTransformation);
+                const float4x4 scene_transform = local_transform * parent_scene_transform;
+                current_data.m_local_transform = transform(local_transform);
+                current_data.m_scene_transform = transform(scene_transform);
+                current_data.m_scene_transform_inv = transform(glm::inverse(current_data.m_scene_transform.m_matrix));
+
+                // parse the meshes associated with this node
+                const uint32 num_meshes = current_node.mNumMeshes;
+                current_data.m_meshes.resize(num_meshes);
+                for (uint32 i = 0u; i < num_meshes; ++i)
+                {
+                    current_data.m_meshes[i] = make_mesh_id(filepath, current_node.mMeshes[i]);
+                }
+
+                // parse the node's name (and add to the name-to-idx map)
+                current_data.m_name = string(current_node.mName.C_Str());
+                sc_asset.m_name_to_node_idx[current_data.m_name] = current_node_idx;
+
+                // parse the node scene transform of each camera node
+                {
+                    auto found = camera_name_to_node_idx.find(current_data.m_name);
+                    if (found != camera_name_to_node_idx.cend())
+                    {
+                        camera_name_to_node_idx[current_data.m_name] = current_node_idx;
+                    }
+                }
+                {
+                    auto found = light_name_to_node_idx.find(current_data.m_name);
+                    if (found != light_name_to_node_idx.cend())
+                    {
+                        light_name_to_node_idx[current_data.m_name] = current_node_idx;
+                    }
+                }
+
+                // traverse children
+                for (uint32 i = 0u; i < current_node.mNumChildren; ++i)
+                {
+                    traverse_node(*current_node.mChildren[i], current_node_idx, scene_transform);
+                }
+            };
+            traverse_node(*scene->mRootNode, k_invalid, to_glm(scene->mRootNode->mTransformation));
+
+            // log scene graph
+            if (cm_log_content.enabled())
+            {
+                sc_asset.m_graph.traverse([&sc_asset](uint32 c, uint32 p)
+                {
+                    const auto& node = sc_asset.m_graph.get(c);
+                    const auto& data = sc_asset.m_graph.get(c).data();
+                    const float3& position = data.m_scene_transform.get_position();
+                    string message = strikers::format("{}: [{}, {}, {}]", data.m_name, position.x, position.y, position.z);
+
+                    // const float3& forward = data.m_scene_transform.get_forward();
+                    // string message = strikers::format("{}: [{}, {}, {}]", data.m_name, forward.x, forward.y, forward.z);
+
+                    // const uint32 num_meshes = (uint32)data.m_meshes.size();
+                    // string message = strikers::format("{}: [{}]", data.m_name, num_meshes);
+
+                    for (uint32 i = 0u; i < node.get_depth(); ++i)
+                        message = "  " + message;
+                    logman::log(message);
+                }, sc_asset.m_graph.k_root, scene_asset::nodegraph::traverse_mode::depth);
+            }
+        }
 
         // parse fbx meshes
-        umap<aiNode*, skel_id> first_bone_node_to_skeleton_id{};
-        umap<string, skel_id> node_name_to_skeleton_id{};
+        umap<string, skel_id> unique_skeletons{};
         for (uint32 i = 0u; i < scene->mNumMeshes; ++i)
         {
             const auto& mesh = scene->mMeshes[i];
@@ -275,8 +270,11 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             {
                 memcpy(&asset_data.m_vertices[v].m_position, &mesh->mVertices[v], sizeof(float3));
                 memcpy(&asset_data.m_vertices[v].m_normal, &mesh->mNormals[v], sizeof(float3));
-                memcpy(&asset_data.m_vertices[v].m_uv, &mesh->mTextureCoords[0][v], sizeof(float2));
                 average_position += asset_data.m_vertices[v].m_position;
+
+                const float3 uv = to_glm(mesh->mTextureCoords[0][v]);;
+                asset_data.m_vertices[v].m_uv.x = uv.x;
+                asset_data.m_vertices[v].m_uv.y = 1 - uv.y;
             }
             for (uint32 f = 0; f < mesh->mNumFaces; ++f)
             {
@@ -291,16 +289,12 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             // parse skeleton if this mesh has bones
             if (num_bones > 0)
             {
-                // create standalone skeleton asset:
-                const auto first_bone_node = mesh->mBones[0]->mNode;
-                const bool skeleton_already_created = first_bone_node_to_skeleton_id.contains(first_bone_node);
-
-                const skel_id skeleton_id = skeleton_already_created ? first_bone_node_to_skeleton_id[first_bone_node] : make_skeleton_id(filepath, i);
-                asset_data.m_skeleton_id = skeleton_id;
-
                 skeleton_asset skeleton_asset{};
-                skeleton_asset.m_bones.resize(num_bones);
+                skeleton_asset.m_name = asset_data.m_name; // copy mesh name
+
+                const skel_id skeleton_id = make_skeleton_id(filepath, i);
                 skeleton_asset.m_skeleton_id = skeleton_id;
+                skeleton_asset.m_bones.resize(num_bones);
 
                 // parse bones
                 umap<aiNode*, uint32> bone_node_to_idx{};
@@ -308,18 +302,19 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
                 {
                     auto& asset_bone = skeleton_asset.m_bones[b];
                     const aiBone* bone = mesh->mBones[b];
+
                     asset_bone.m_mat_inverse_bind = to_glm(bone->mOffsetMatrix);
-                    asset_bone.m_mat_transform = (b == 0u) ? glm::mat4x4(1) : to_glm(bone->mNode->mTransformation);
+                    asset_bone.m_mat_transform = (b == 0) ? float4x4(1) : to_glm(bone->mNode->mTransformation);
+                   
                     asset_bone.m_name = bone->mName.C_Str();
                     bone_node_to_idx[bone->mNode] = b;
-                    node_name_to_skeleton_id[bone->mNode->mName.C_Str()] = skeleton_id;
                     skeleton_asset.m_name_to_bone_idx[asset_bone.m_name] = b;
 
                     for (uint32 w = 0u; w < bone->mNumWeights; ++w)
                     {
                         const aiVertexWeight& weight = bone->mWeights[w];
                         mesh_asset::vertex& vertex = asset_data.m_vertices[weight.mVertexId];
-                        
+
                         // bind the bone to the vertex with a weight
                         const float added_weight = glm::min(vertex.m_weight_remainder, weight.mWeight);
                         vertex.m_bone_indices[vertex.m_num_active_bones] = b;
@@ -328,6 +323,8 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
                         vertex.m_num_active_bones++;
                     }
                 }
+
+                // parent bones through index
                 for (uint32 b = 0u; b < num_bones; ++b)
                 {
                     aiNode* parent_node = mesh->mBones[b]->mNode->mParent;
@@ -339,12 +336,19 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
                     }
                 }
 
-                if (!skeleton_already_created)
+                // actually SKIP the new asset since we're detecting this was all just a duplicate.
+                // we can't skip the earlier work, because it populates our mesh vertices with bone values!
+                if (!unique_skeletons.contains(skeleton_asset.m_name))
                 {
                     allocate_asset<asset_type::skeleton>(skeleton_id, skeleton_asset, root_id);
-                    first_bone_node_to_skeleton_id[first_bone_node] = skeleton_id;
+                    asset_data.m_skeleton_id = skeleton_id;
+
+                    if (cm_log_content.enabled())
+                        logman::log("- skeleton: {}", skeleton_asset.m_name.c_str());
+                    unique_skeletons[skeleton_asset.m_name] = skeleton_id;
                 }
-                asset_data.m_skeleton_id = skeleton_id;
+
+                asset_data.m_skeleton_id = unique_skeletons[skeleton_asset.m_name];
             }
 
             // calculate avg distances
@@ -365,20 +369,104 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
                 }
             }
             asset_data.m_bounds_sphere.m_position_radius.w = glm::sqrt(furthest_distance_sqr);
-
             asset_data.m_mat_id = material_ids[mesh->mMaterialIndex];
             allocate_asset<asset_type::mesh>(mesh_id, asset_data, root_id);
         }
 
-        // parse fbx animations
+        // parse cameras
+        for (uint32 i = 0u; i < scene->mNumCameras; ++i)
+        {
+            // we only add cameras of which we found a node in the scene hierarchy
+            const auto& ai_camera = scene->mCameras[i];
+            const string camera_name = string(ai_camera->mName.C_Str());
+            const uint32 camera_idx = (uint32)sc_asset.m_cameras.size();
+
+            // apply camera intrinsic transform to the scene transform
+            if (camera_name_to_node_idx.contains(camera_name))
+            {
+                transform& camera_scene_transform = sc_asset.m_graph.get(camera_name_to_node_idx[camera_name]).data().m_scene_transform;
+                aiMatrix4x4 ai_camera_matrix;
+                ai_camera->GetCameraMatrix(ai_camera_matrix);
+                const float4x4 camera_matrix = to_glm(ai_camera_matrix);
+                camera_scene_transform.m_matrix = camera_scene_transform.m_matrix * camera_matrix;
+
+                sc_asset.m_camera_to_node_idx[camera_idx] = camera_name_to_node_idx[camera_name];
+                sc_asset.m_node_to_camera_idx[camera_name_to_node_idx[camera_name]] = camera_idx;
+            }
+
+            camera cm{};
+            cm.m_aspect_ratio = ai_camera->mAspect;
+            cm.m_clip_near = ai_camera->mClipPlaneNear;
+            cm.m_clip_far = ai_camera->mClipPlaneFar;
+            cm.m_fov_vertical = 2.0f * atan(tan(ai_camera->mHorizontalFOV) / ai_camera->mAspect);
+            cm.m_ortho_width = ai_camera->mOrthographicWidth;
+            sc_asset.m_cameras.push_back(cm);
+        }
+
+        // parse lights
+        for (uint32 i = 0u; i < scene->mNumLights; ++i)
+        {
+            const auto& aiLight = scene->mLights[i];
+
+            light light{};
+            switch (aiLight->mType) {
+            case aiLightSource_DIRECTIONAL: light.m_type = light::directional; break;
+            case aiLightSource_POINT: light.m_type = light::point; break;
+            case aiLightSource_SPOT: light.m_type = light::cone; break;
+            }
+
+            const uint32 light_idx = (uint32)sc_asset.m_lights.size();
+
+            // apply camera intrinsic transform to the scene transform
+            const string name = string(aiLight->mName.C_Str());
+            if (light_name_to_node_idx.contains(name))
+            {
+                transform& light_scene_transform = sc_asset.m_graph.get(light_name_to_node_idx[name]).data().m_scene_transform;
+                const transform light_transform = transform::build(
+                    to_glm(aiLight->mPosition),
+                    make_look_rotation(to_glm(aiLight->mDirection), to_glm(aiLight->mUp)),
+                    float3(1, 1, 1)
+                );
+                light_scene_transform.m_matrix = light_scene_transform.m_matrix * light_transform.m_matrix;
+
+                sc_asset.m_light_to_node_idx[light_idx] = light_name_to_node_idx[name];
+                sc_asset.m_node_to_light_idx[light_name_to_node_idx[name]] = light_idx;
+            }
+
+            aiLight->mAngleInnerCone;
+            aiLight->mAngleOuterCone;
+            aiLight->mAttenuationConstant;
+            aiLight->mAttenuationLinear;
+            aiLight->mSize;
+            light.m_color_ambient = to_glm(aiLight->mColorAmbient);
+            light.m_color_diffuse = to_glm(aiLight->mColorDiffuse);
+            light.m_color_specular = to_glm(aiLight->mColorSpecular);
+            light.m_name = string(aiLight->mName.C_Str());
+            sc_asset.m_lights.push_back(light);
+        }
+
+        // parse animations
         for (uint32 i = 0u; i < scene->mNumAnimations; ++i)
         {
             const anim_id animation_id = make_animation_id(filepath, i);
             animation_asset asset{};
+            asset.m_animation_id = animation_id;
 
             const aiAnimation* animation = scene->mAnimations[i];
+            asset.m_name = animation->mName.C_Str();
             const uint32 num_channels = animation->mNumChannels;
             asset.m_channels.resize(num_channels);
+
+            // find the parent object node
+#if 0
+            uint32 node_idx = 0u;
+            const string object_name = asset.m_name.substr(0, asset.m_name.find('|'));
+            if (sc_asset.find_node_by_name(object_name, node_idx))
+            {
+                const auto& graph_entry = sc_asset.m_graph.get(node_idx).data();
+                graph_entry.m_scene_transform;
+            }
+#endif
 
             for (uint32 c = 0u; c < animation->mNumChannels; ++c)
             {
@@ -395,7 +483,7 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
                 asset.m_name_to_channel_idx[target_channel.m_name] = c;
 
                 // if this is ever different, our systems can't handle that...
-                assert(num_position_keys == num_rotation_keys == num_scaling_keys);
+                assert((num_position_keys == num_rotation_keys) && num_scaling_keys == num_rotation_keys);
                 
                 for (uint32 k = 0u; k < num_position_keys; ++k)
                 {
@@ -442,14 +530,27 @@ result<asset_id> contentman::load_assimp_file(const stringview& filepath)
             load_image_file(scene->mTextures[i]->mFilename.C_Str());
         }
 
-        logman::log("- num meshes: {}", scene->mNumMeshes);
+        // load skeletons
+        for (uint32 i = 0u; i < scene->mNumSkeletons; ++i)
+        {
+            //
+            static int a = 0;
+            a++;
+        }
+
+        // allocate the scene asset
+        allocate_asset<asset_type::scene>(sc_id, sc_asset, root_id);
+
+        if (cm_log_content.enabled())
+            logman::log("- num meshes: {}", scene->mNumMeshes);
     }
     return root_id;
 }
 
 result<asset_id> contentman::load_image_file(const stringview& filepath)
 {
-    logman::log("loading_image({})", filepath);
+    if (cm_log_content.enabled()) 
+        logman::log("loading_image({})", filepath);
 
     using restype = result<asset_id>;
     if (!std::filesystem::exists(filepath))
@@ -484,7 +585,8 @@ result<asset_id> contentman::load_image_file(const stringview& filepath)
     asset_id asset_id = 0u;
     if (fetch_typed_asset<asset_type::image>(img_id, img_data, &asset_id))
     {
-        logman::log("- reload!");
+        if (cm_log_content.enabled())
+            logman::log("- reload!");
         stbi_image_free(img_data->m_raw_data_ptr); // free the previous data
         fill_data(*img_data);
         return asset_id;
@@ -513,7 +615,8 @@ result<asset_id> contentman::load_obj(const stringview& filepath)
         return restype::make_fail("file at path is not .obj!");
     }
 
-    logman::log("loading_obj({})", filepath);
+    if (cm_log_content.enabled())
+        logman::log("loading_obj({})", filepath);
     return load_assimp_file(filepath);
 }
 
@@ -521,7 +624,8 @@ result<asset_id> contentman::load_custom_mesh(const mesh_asset& mesh_data, const
 {
     using restype = result<asset_id>;
 
-    logman::log("loading_custom_mesh({})", id);
+    if (cm_log_content.enabled())
+        logman::log("loading_custom_mesh({})", id);
     return allocate_asset<asset_type::mesh>(id, mesh_data);
 }
 
@@ -560,11 +664,11 @@ bool contentman::is_compatible(const anim_id animation, const skel_id skeleton) 
     const auto& channel_names = found_anim.claim()->m_name_to_channel_idx;
     for (const auto& pair : channel_names)
     {
-        if (!bone_names.contains(pair.first))
-            return false;
+        if (bone_names.contains(pair.first))
+            return true;
     }
 
-    return true;
+    return false;
 }
 
 bool contentman::find_compatible_animations(const skel_id skeleton, vector<anim_id>& out_anims) const
@@ -579,13 +683,13 @@ bool contentman::find_compatible_animations(const skel_id skeleton, vector<anim_
     
     for (const auto& anim_asset : get_typed_assets<asset_type::animation>().m_asset_datas)
     {
-        bool is_compatible = true;
+        bool is_compatible = false;
         const auto& channel_names = anim_asset.m_name_to_channel_idx;
         for (const auto& pair : channel_names)
         {
-            if (!bone_names.contains(pair.first))
+            if (bone_names.contains(pair.first))
             {
-                is_compatible = false;
+                is_compatible = true;
                 break;
             }
         }
@@ -595,7 +699,7 @@ bool contentman::find_compatible_animations(const skel_id skeleton, vector<anim_
             out_anims.push_back(anim_asset.m_animation_id);
         }
     }
-    return true;
+    return out_anims.size() > 0;
 }
 
 result<asset_id> contentman::load_fbx(const stringview& filepath)
@@ -614,7 +718,8 @@ result<asset_id> contentman::load_fbx(const stringview& filepath)
         return restype::make_fail("file at path is not .fbx!");
     }
 
-    logman::log("loading_fbx({})", filepath);
+    if (cm_log_content.enabled())
+        logman::log("loading_fbx({})", filepath);
     return load_assimp_file(filepath);
 }
 

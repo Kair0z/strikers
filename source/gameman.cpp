@@ -45,222 +45,24 @@ command cm_game_ball_shot_spd("game_ball_shot_spd", "1");
 command cm_game_ball_decay_seconds("game_ball_decay_seconds", "8"); // time it takes for a ball to decay entirely to 0
 command cm_game_ball_maxshoot_seconds("game_ball_maxshoot_seconds", "2"); // time until shoot releases
 command cm_game_ball_maxcharge_seconds("game_ball_maxcharge_seconds", "4"); // time until charge is full
-
 command cm_game_ai("game_ai", "1");
 command cm_game_ai_min_dtime("game_ai_min_dtime", "1");
 command cm_game_ai_max_dtime("game_ai_max_dtime", "1");
 command cm_game_ai_random("game_ai_random", "1");
-
+command cm_game_camera_speed("game_camera_speed", "1");
+command cm_game_camera_ball_offset_x("game_camera_ball_offset_x", "0");
+command cm_game_camera_ball_offset_z("game_camera_ball_offset_z", "23");
 command cm_draw_dbg("draw_dbg", "0");
 command cm_draw_dbg_bounds("draw_dbg_bounds", "0");
 command cm_draw_dbg_transforms("draw_dbg_transforms", "0");
+command cm_draw_dbg_axis("draw_dbg_axis", "0");
 command cm_draw_dbg_ball("draw_dbg_ball", "0");
+
+// animation
+command cm_anim_speed("cm_anim_speed", "1");
 
 command cm_gfx_shadowmap_size("gfx_shadowmap_size", "1024");
 command cm_gfx_shadowfrustrum_size("gfx_shadowfrustrum_size", "50");
-
-// in this function, we parse the fbx asset data (loaded in cman) 
-// and construct a hierarchy of actors, transforms & components.
-void gameman::assemble_fbx_scene(const contentman& cman, const stringview& filepath)
-{
-	const scene_id scid = contentman::make_scene_id(filepath);
-	const scene_asset& scene = *cman.find_typed_asset<asset_type::scene>(scid).claim();
-
-	// load camera data
-	if (!scene.m_cameras.empty())
-	{
-		m_camera.m_asset_id = scene.m_cameras[0];
-		camera_asset const* camera = cman.find_camera(m_camera.m_asset_id);
-		if (camera)
-		{
-			m_camera.m_transform.m_matrix = camera->m_scene_transform;
-			m_camera.m_transform.add_position_local({ 0,0,15 });
-			m_camera.m_transform_original = m_camera.m_transform;
-		}
-	}
-
-	// translate the scene hierarchy to 'game transform hierarchy'
-	umap<uint32, actor_id> node_id_to_actor_id{};
-	scene.m_graph.traverse([cman, this, &scene, &node_id_to_actor_id](uint32 node_id, uint32 parent_id)
-	{
-		const bool valid_parent = scene.m_graph.is_valid(parent_id) && node_id_to_actor_id.contains(parent_id);
-		const actor_id parent_actor = valid_parent ? node_id_to_actor_id[parent_id] : k_actor_invalid;
-		const scene_asset::node& parent = scene.m_graph.get(parent_id).data();
-		const scene_asset::node& node = scene.m_graph.get(node_id).data();
-
-		auto instantiate = [this, &node_id_to_actor_id, node_id, &cman](
-			const actor_id parent_actor,
-			const scene_asset::node& node,
-			const scene_asset::node& parent_node,
-			bool is_runner) -> actor_id
-		{
-			const actor_id root_actor = create_actor(parent_actor);
-			node_id_to_actor_id[node_id] = root_actor;
-			actor(root_actor)
-				.set_transform(node.m_scene_transform, space::world)
-				.set_name(node.m_name);
-
-			auto initialize_dynamic_physics = [this](actor_id id) {
-				actor(id).add_component<component::type::physics>();
-				actor(id).component<component::type::physics>()
-					->set_mass(1.0f)
-					.set_layer(collision_layers::common);
-			};
-			auto initialize_static_physics = [this](actor_id id) {
-				actor(id).add_component<component::type::physics>();
-				actor(id).component<component::type::physics>()
-					->set_static()
-					.set_layer(collision_layers::static_level);
-			};
-			auto initialize_runner = [this](actor_id id) {
-				actor(id)
-					.add_component<component::type::movement>()
-					.add_component<component::type::brain>();
-			};
-
-			if (is_runner)
-			{
-				initialize_dynamic_physics(root_actor);
-				initialize_runner(root_actor);
-			}
-
-			if (strstr(node.m_name.c_str(), "kritter_left"))
-			{
-				initialize_dynamic_physics(root_actor);
-				m_goalies[team::left].m_actor = root_actor;
-			}
-			if (strstr(node.m_name.c_str(), "kritter_right"))
-			{
-				initialize_dynamic_physics(root_actor);
-				m_goalies[team::right].m_actor = root_actor;
-			}
-			if (strstr(node.m_name.c_str(), "ball"))
-			{
-				initialize_dynamic_physics(root_actor);
-				m_ball.m_actor = root_actor;
-			}
-			if (strstr(node.m_name.c_str(), "wall"))
-			{
-				initialize_static_physics(root_actor);
-			}
-			if (strstr(node.m_name.c_str(), "floor"))
-			{
-				initialize_static_physics(root_actor);
-			}
-			if (strstr(node.m_name.c_str(), "light"))
-			{
-				m_light.m_transform = actor(root_actor).get_transform(space::world);
-			}
-			if (strstr(node.m_name.c_str(), "goalzone_left"))
-			{
-				initialize_static_physics(root_actor);
-				m_teams[team::left].m_goal_actor = root_actor;
-			}
-			if (strstr(node.m_name.c_str(), "goalzone_right"))
-			{
-				initialize_static_physics(root_actor);
-				m_teams[team::right].m_goal_actor = root_actor;
-			}
-			if (strstr(node.m_name.c_str(), "kp_middle"))
-			{
-				m_field.m_midpoint_actor = root_actor;
-			}
-
-			// parse the keypoint transforms
-			if (strstr(node.m_name.c_str(), "team_"))
-			{
-				for (uint32 t = 0u; t < team::num; ++t)
-					for (uint32 r = 0u; r < runner::num; ++r)
-					{
-						const string keypoint_name = format("{}_{}", team::get_name(t), runner::get_name(r));
-						if (strstr(node.m_name.c_str(), keypoint_name.c_str()))
-						{
-							m_runners[get_global_runner_idx(t, r)].m_start_transform
-								= actor(root_actor).get_transform(space::world);
-						}
-					}
-			}
-			
-			// create each mesh as child actor
-			for (uint32 i = 0u; i < node.m_meshes.size(); ++i)
-			{
-				const mesh_id meshid = node.m_meshes[i];
-				actor_id mesh_actor = create_actor(root_actor);
-				m_transman.set_transform(m_actors[mesh_actor].m_transform_id, transform::identity(), space::local);
-
-				// get the mesh & material, if material is named 'collider' we add a bounds component to the actor
-				bool is_material_collider = false;
-				mesh_asset const* mesh = nullptr; material_asset const* material = nullptr;
-				if (cman.find_mesh_and_material(meshid, mesh, material))
-				{
-					if (strstr(material->m_name.c_str(), "collider"))
-					{
-						actor(root_actor).add_component<component::type::bounds>();
-						auto* bounds = actor(root_actor).component<component::type::bounds>();
-						bounds->m_box = mesh->m_bounds_box;
-						bounds->m_sphere = mesh->m_bounds_sphere;
-						// mesh_transform.m_name = node.m_name + ": collider";
-					}
-					else
-					{
-						actor(mesh_actor).add_component<component::type::render>();
-						auto* render = actor(mesh_actor).component<component::type::render>();
-						render->m_mesh = meshid;
-						// mesh_transform.m_name = node.m_name + ": mesh-" + std::to_string(i);
-					}
-				}
-			}
-
-			return root_actor;
-		};
-
-		// check if we want to create this actor as a character...
-		character::type character = character::num;
-		for (uint32 c = 0u; c < character::num; ++c)
-		{
-			if (strstr(node.m_name.c_str(), character::get_name((character::type)c)))
-			{
-				character = (character::type)c;
-			}
-		}
-
-		// in case of a character, we may instantiate it multiple times, may instantiate it 0 times
-		// it depends on the setupscript
-		uint32 global_runner_idx = (uint32)-1;
-		if (character == character::num)
-		{
-			instantiate(parent_actor, node, parent, false);
-		}
-		else
-		{
-			for (uint32 t = 0u; t < team::num; ++t)
-			{
-				for (uint32 r = 0u; r < runner::num; ++r)
-				{
-					const uint32 runner_index = get_global_runner_idx(t, r);
-					runner& rnr = m_runners[runner_index];
-					if (rnr.m_character == character && rnr.m_actor == k_actor_invalid)
-					{
-						rnr.m_actor = instantiate(parent_actor, node, parent, true);
-					}
-				}
-			}
-		}
-	});
-
-	// set the runner transforms to their designated keypoint
-	for (uint32 r = 0u; r < team::num * runner::num; ++r)
-	{
-		const runner& rnr = m_runners[r];
-		m_actor_to_runner_idx[rnr.m_actor] = r;
-		actor(rnr.m_actor)
-			.set_position(rnr.m_start_transform.get_position(), space::world)
-			.set_rotation(rnr.m_start_transform.get_rotation(), space::world);
-	}
-
-	// resolve & save as 'reset' position
-	m_transman.save_as_reset();
-}
 
 void gameman::reset(reset::flags flags)
 {
@@ -278,8 +80,8 @@ void gameman::reset(reset::flags flags)
 	
 	if (flags & reset::camera)
 	{
+		actor(m_camera.m_actor).reset_transform();
 		m_camera.m_velocity = {};
-		m_camera.m_transform = m_camera.m_transform_original;
 	}
 }
 
@@ -293,39 +95,357 @@ void gameman::start(const contentman& cman)
 		{
 			for (uint32 i = 0u; i < runner::num; ++i)
 			{
-				const uint32 runner_idx = get_global_runner_idx(t, i);
+				const uint32 runner_idx = get_runner_idx(t, i);
 				const string varname = format("{}.{}", team::get_name((team::slot)t), runner::get_name((runner::slot)i));
-				for (uint32 c = 0u; c < character::num; ++c)
+				for (uint32 c = 0u; c < character_runner::num; ++c)
 				{
-					if (strstr(character::get_name(c), setup_settings[varname].c_str()))
+					if (strstr(character_runner::get_name(c), setup_settings[varname].c_str()))
 					{
-						m_runners[runner_idx].m_character = (character::type)c;
+						m_runners[runner_idx].m_character = (character_runner::type)c;
 					}
 				}
 			}
 		}
 	}
 
-	assemble_fbx_scene(cman, string(k_content_folder) + "scene.fbx");
+	// fbx scene -> actors & components
+	{
+		const string scene_filepath = string(k_content_folder) + "scene.fbx";
+		const scene_id scid = contentman::make_scene_id(scene_filepath);
+		const scene_asset& scene = *cman.find_typed_asset<asset_type::scene>(scid).claim();
+
+		// struct that keeps track of nodes that have important traits!
+		struct important_info_builder final
+		{
+			enum flags
+			{
+				ball = (1 << 0),
+				goalie = (1 << 1),
+				keypoint = (1 << 2),
+				runner = (1 << 3),
+				light = (1 << 4),
+				goal = (1 << 5),
+				camera = (1 << 6),
+				goalzone = (1 << 7),
+				num_flags = 8
+			};
+			uint32 m_flags;
+			uint32 m_char_runner;
+			uint32 m_char_goalie;
+
+			important_info_builder& as_runner(uint32 chr) { 
+				if (chr != character_runner::num) 
+					m_flags |= runner; 
+				m_char_runner = chr; 
+				return *this; 
+			}
+			important_info_builder& as_goalie(uint32 chr) { 
+				if (chr != character_goalie::num) 
+					m_flags |= goalie; 
+				m_char_goalie = chr;
+				return *this; 
+			}
+			important_info_builder& name(const char* name)
+			{
+				if (strstr(name, "kp_")) m_flags |= keypoint;
+				if (strstr(name, "camera")) m_flags |= camera;
+				if (strstr(name, "light")) m_flags |= light;
+				if (strstr(name, "ball")) m_flags |= ball;
+				if (strstr(name, "goalzone")) m_flags |= goalzone;
+				return *this;
+			}
+		};
+
+		// we're also keeping track of all important objects
+		uint32 important_counters[important_info_builder::num_flags]{};
+
+		umap<uint32, actor_id> node_id_to_actor_id{};
+		auto instantiate_actor = [this, &node_id_to_actor_id, &scene, &cman, &important_counters]
+		(uint32 node_id, const actor_id parent_actor = k_actor_invalid, const important_info_builder& builder = {}) -> actor_id
+		{
+			const scene_asset::node& current_node = scene.m_graph.get(node_id).data();
+
+			// create & register the actor
+			const actor_id main_actor = create_actor(parent_actor);
+			node_id_to_actor_id[node_id] = main_actor;
+			
+			// each actor has a transform & name
+			actor(main_actor)
+				.set_transform(current_node.m_scene_transform, space::world)
+				.set_name(current_node.m_name);
+
+			const auto& new_actor_transform = actor(main_actor).get_transform(space::world);
+
+			// if this object is the area pitch, capture the bounds of the mesh
+			if (strstr(current_node.m_name.c_str(), "area_pitch"))
+			{
+				if (current_node.m_meshes.size() > 0)
+				{
+					if (auto* mesh = cman.find_mesh(current_node.m_meshes[0]))
+					{
+						m_field.m_pitch_bounds = box::transformed_aabb(mesh->m_bounds_box, new_actor_transform);
+						return main_actor;
+					}
+				}
+			}
+
+			if (builder.m_flags & important_info_builder::keypoint)
+			{
+				for (uint32 t = 0u; t < team::num; ++t)
+				for (uint32 r = 0u; r < runner::num; ++r)
+				{
+					const string keypoint_name = format("kp_{}_{}", team::get_name(t), runner::get_name(r));
+					if (strstr(current_node.m_name.c_str(), keypoint_name.c_str()))
+					{
+						m_runners[get_runner_idx(t, r)].m_start_transform = new_actor_transform;
+					}
+				}
+				for (uint32 t = 0u; t < team::num; ++t)
+				{
+					const string keypoint_name = format("kp_{}_{}", team::get_name(t), "goalie");
+					if (strstr(current_node.m_name.c_str(), keypoint_name.c_str()))
+					{
+						m_goalies[t].m_start_transform = new_actor_transform;
+					}
+				}
+				if (strstr(current_node.m_name.c_str(), "middle"))
+				{
+					m_field.m_midpoint_actor = main_actor;
+				}
+			}
+			if (builder.m_flags & important_info_builder::goalie)
+			{
+				actor(main_actor).add_component<component::type::physics>();
+				actor(main_actor).component<component::type::physics>()
+					->set_mass(1.0f)
+					.set_layer(collision_layers::common);
+			}
+			if (builder.m_flags & important_info_builder::ball)
+			{
+				m_ball.m_actor = main_actor;
+				actor(main_actor).add_component<component::type::physics>();
+				actor(main_actor).component<component::type::physics>()
+					->set_mass(1.0f)
+					.set_layer(collision_layers::common);
+			}
+			if (builder.m_flags & important_info_builder::runner)
+			{
+				actor(main_actor).add_component<component::type::physics>();
+				actor(main_actor).add_component<component::type::movement>();
+				actor(main_actor).component<component::type::physics>()
+					->set_mass(1.0f)
+					.set_layer(collision_layers::common);
+			}
+			if (builder.m_flags & important_info_builder::light)
+			{
+				m_lights.m_actor_directional = main_actor;
+				actor(main_actor).add_component<component::type::light>();
+				
+				if (scene.m_node_to_light_idx.contains(node_id))
+				{
+					light& target_light = actor(main_actor).component<component::type::light>()->m_light;
+					const light& scene_light = scene.m_lights[scene.m_node_to_light_idx.at(node_id)];
+					target_light = scene_light;
+				}
+			}
+			if (builder.m_flags & important_info_builder::camera)
+			{
+				m_camera.m_actor = main_actor;
+				m_camera.m_initial_right = new_actor_transform.get_right();
+				m_camera.m_velocity = {};
+
+				if (scene.m_node_to_camera_idx.contains(node_id))
+				{
+					const camera& scene_camera = scene.m_cameras[scene.m_node_to_camera_idx.at(node_id)];
+					m_camera.m_camera = scene_camera;
+				}
+			}
+			if (builder.m_flags & important_info_builder::goalzone)
+			{
+				for (uint32 t = 0u; t < team::num; ++t)
+				{
+					const string goalzone_name = format("goalzone_{}", team::get_name(t));
+					if (strstr(current_node.m_name.c_str(), goalzone_name.c_str()))
+					{
+						m_teams[t].m_goal_actor = main_actor;
+					}
+				}
+			}
+
+			// each submesh of this node becomes a child actor (except if tagged 'collider')
+			for (uint32 i = 0u; i < current_node.m_meshes.size(); ++i)
+			{
+				// get the mesh & material, if material is tagged 'collider' we skip the mesh, and add the 'bounds' component to the root actor
+				const mesh_id meshid = current_node.m_meshes[i];
+				mesh_asset const* mesh = nullptr; material_asset const* material = nullptr;
+				if (cman.find_mesh_and_material(meshid, mesh, material))
+				{
+					if (strstr(material->m_name.c_str(), "collider"))
+					{
+						actor(main_actor).add_component<component::type::bounds>();
+						auto* bounds = actor(main_actor).component<component::type::bounds>();
+						bounds->m_box = mesh->m_bounds_box;
+						bounds->m_sphere = mesh->m_bounds_sphere;
+						// mesh_transform.m_name = node.m_name + ": collider";
+						continue;
+					}
+				}
+
+				actor_id mesh_actor = create_actor(main_actor);
+				actor(mesh_actor).set_transform(transform::identity(), space::local);
+
+				// configure the render component
+				actor(mesh_actor).add_component<component::type::render>();
+				auto* render = actor(mesh_actor).component<component::type::render>();
+				render->m_mesh = meshid;
+
+				// configure the skeleton & animations (if the mesh has those)
+				const skel_id skeleton_id = mesh->m_skeleton_id;
+				if (skeleton_id != k_id_invalid)
+				{
+					actor(mesh_actor).add_component<component::type::skeleton>();
+					auto* skeleton = actor(mesh_actor).component<component::type::skeleton>();
+					skeleton->m_skeleton = skeleton_id;
+
+					vector<anim_id> compatible_animations{};
+					if (cman.find_compatible_animations(skeleton_id, compatible_animations))
+					{
+						actor(mesh_actor).add_component<component::type::animation>();
+						auto* animation = actor(mesh_actor).component<component::type::animation>();
+						animation->m_animation = compatible_animations[0];
+					}
+				}
+			}
+
+			// count the instantiated important objects
+			for (uint32 i = 0u; i < important_info_builder::num_flags; ++i)
+			{
+				important_counters[i] += (builder.m_flags & (1 << i)) != 0;
+			}
+
+			return main_actor;
+		};
+
+		// traverse each node in the scene, and parse the relevant actors
+		scene.m_graph.traverse([cman, this, &scene, &node_id_to_actor_id, &instantiate_actor](uint32 node_id, uint32 parent_id)
+		{
+			const bool valid_parent = scene.m_graph.is_valid(parent_id) && node_id_to_actor_id.contains(parent_id);
+			const actor_id parent_actor = valid_parent ? node_id_to_actor_id[parent_id] : k_actor_invalid;
+
+			const scene_asset::node& parent_node = scene.m_graph.get(parent_id).data();
+			const scene_asset::node& current_node = scene.m_graph.get(node_id).data();
+
+			// check if this node is a character (by name)
+			character_runner::type character_runner = character_runner::num;
+			character_goalie::type character_goalie = character_goalie::num;
+			for (uint32 c = 0u; c < character_runner::num; ++c)
+				{
+					if (strstr(current_node.m_name.c_str(), character_runner::get_name((character_runner::type)c)))
+					{
+						character_runner = (character_runner::type)c;
+					}
+				}
+			for (uint32 c = 0u; c < character_goalie::num; ++c)
+				{
+					if (strstr(current_node.m_name.c_str(), character_goalie::get_name((character_goalie::type)c)))
+					{
+						character_goalie = (character_goalie::type)c;
+					}
+				}
+
+			// if character_runner, instantiate for each runner with that character (and return)
+			if (character_runner != character_runner::num)
+				{
+					for (uint32 t = 0u; t < team::num; ++t)
+						for (uint32 r = 0u; r < runner::num; ++r)
+						{
+							runner& rnr = m_runners[get_runner_idx(t, r)];
+							if (rnr.m_character == character_runner && rnr.m_actor == k_actor_invalid)
+							{
+								rnr.m_actor = instantiate_actor(node_id, parent_actor, important_info_builder()
+									.name(current_node.m_name.c_str())
+									.as_runner(character_runner)
+								);
+							}
+						}
+					return;
+				}
+
+			// if character_goalie, instantiate for each goalie with that character (and return)
+			if (character_goalie != character_goalie::num)
+				{
+					for (uint32 t = 0u; t < team::num; ++t)
+					{
+						goalie& goalie = m_goalies[t];
+						if (goalie.m_character == character_goalie && goalie.m_actor == k_actor_invalid)
+						{
+							goalie.m_actor = instantiate_actor(node_id, parent_actor, important_info_builder()
+								.name(current_node.m_name.c_str())
+								.as_goalie(character_goalie)
+							);
+						}
+					}
+					return;
+				}
+
+			instantiate_actor(node_id, parent_actor, important_info_builder()
+				.name(current_node.m_name.c_str())
+			);
+		});
+
+		// set the runner & goalie transforms to their designated keypoint
+		for (uint32 r = 0u; r < team::num * runner::num; ++r)
+		{
+			const runner& rnr = m_runners[r];
+			m_actor_to_runner_idx[rnr.m_actor] = r;
+			actor(rnr.m_actor)
+				.set_position(rnr.m_start_transform.get_position(), space::world)
+				.set_rotation(rnr.m_start_transform.get_rotation(), space::world);
+		}
+		for (uint32 t = 0u; t < team::num; ++t)
+		{
+			const goalie& goal = m_goalies[t];
+			m_actor_to_goalie_idx[goal.m_actor] = t;
+			actor(goal.m_actor)
+				.set_position(goal.m_start_transform.get_position(), space::world)
+				.set_rotation(goal.m_start_transform.get_rotation(), space::world);
+		}
+
+		// resolve & save as 'reset' position
+		m_transman.save_as_reset();
+		
+		// game validity checks
+		{
+			logman::log("-- checking for necessary game parts");
+			
+			uint32 num_valid_goals = 0;
+			uint32 num_valid_keepers = 0;
+			for (uint32 t = 0; t < team::num; ++t)
+				num_valid_goals += (m_teams->m_goal_actor != k_actor_invalid),
+				num_valid_keepers += (m_goalies[t].m_actor != k_actor_invalid);
+
+			if (num_valid_goals < 2)			logman::color(logcolor::red), logman::log("- check failed! not enough valid goals!");
+			else if (num_valid_keepers < 2)		logman::color(logcolor::red), logman::log("- check failed! not enough valid keepers!");
+			else								logman::color(logcolor::green), logman::log("-- all checks passed! game is ready!");
+			logman::prev_color();
+		}
+	}
 
 	// setup collision layers
 	{
+		// common x block x common
 		m_collisionman.set_layer_response(
-			collision_layers::common, 
-			collision_layers::common,
-			collision_response::block);
-
+			collision_layers::common, collision_layers::common, collision_response::block);
+		
+		// common x ignore x common_ignored
 		m_collisionman.set_layer_response(
-			collision_layers::common, 
-			collision_layers::common_ignored,
-			collision_response::ignore);
+			collision_layers::common, collision_layers::common_ignored, collision_response::ignore);
 
+		// common x trigger x common_trigger
 		m_collisionman.set_layer_response(
-			collision_layers::common,
-			collision_layers::common_trigger,
-			collision_response::trigger);
+			collision_layers::common, collision_layers::common_trigger, collision_response::trigger);
 
-		// level_bounds blocks all! (except itself)
+		// level_bounds blocks everything! (except itself)
 		for (uint32 i = 0u; i < collision_layers::num; ++i)
 		{
 			const collision_layers::layer lyr = (collision_layers::layer)i;
@@ -335,22 +455,68 @@ void gameman::start(const contentman& cman)
 	}
 	
 	// setup players
-	m_players[player::one].m_team_idx = team::left;
-	m_players[player::one].m_active = true;
-	m_players[player::two].m_team_idx = team::right;
-	m_players[player::two].m_active = false;
+	for (uint32 i = 0u; i < player::num; ++i)
+	{
+		m_players[i].m_active = true;
+		m_players[i].m_team_idx = (i / 2) % team::num;
+		m_players[i].m_current_local_runner = i;
+	}
 }
 
 void gameman::tick(const tick_context& ctx)
 {
-	tick_game(ctx);
+	// resolve dev-camera controls
+	inputman& input = inputman::get();
+	const bool devcontrols_enabled = cm_camera_dev_control.enabled();
+	if (devcontrols_enabled)
+	{
+		// move the camera
+		const float left = input.is_button_down(cm_camera_dev_left.value().c_str());
+		const float fwd = input.is_button_down(cm_camera_dev_forward.value().c_str());
+		const float back = input.is_button_down(cm_camera_dev_back.value().c_str());
+		const float right = input.is_button_down(cm_camera_dev_right.value().c_str());
+		const float up = input.is_button_down(cm_camera_dev_up.value().c_str());
+		const float down = input.is_button_down(cm_camera_dev_down.value().c_str());
+		const float sprint_multiplier = 1.0f + input.is_button_down(cm_camera_dev_sprint.value().c_str()) * 2;
+
+		const auto transform_world = actor(m_camera.m_actor).get_transform();
+		const float3 delta_horizontal = (transform_world.get_right() * (right - left)) + (transform_world.get_forward() * (back - fwd));
+		const float3 delta_vertical = (float3(0, 1, 0) * (up - down));
+		const float3 delta_position = delta_horizontal + delta_vertical;
+		m_camera.m_movement_input = delta_position;
+
+		// orient
+		const float2 mouse_delta = input.get_mouse_delta();
+		if (input.is_button_down(inputman::button::rmouse) && glm::dot(mouse_delta, mouse_delta) > 0.001)
+		{
+			m_camera.m_orient_input = mouse_delta;
+		}
+		else m_camera.m_orient_input = {};
+
+		if (input.is_button_down(cm_camera_dev_reset.value().c_str()))
+		{
+			reset(reset::camera);
+		}
+	}
+
+	// only tick game if devcontrol is off!
+	if (!devcontrols_enabled)
+	{
+		tick_game(ctx);
+	}
+
+	// always tick the systems
 	tick_systems(ctx);
+
+	if (input.is_button_down(cm_game_reset.value().c_str()))
+	{
+		reset(reset::game);
+	}
 }
 
 void gameman::tick_game(const tick_context & ctx)
 {
 	inputman& input = inputman::get();
-	const bool devcontrols_enabled = cm_camera_dev_control.enabled();
 
 	// ball logic
 	{
@@ -369,7 +535,7 @@ void gameman::tick_game(const tick_context & ctx)
 						&& m_actor_to_runner_idx[other_actor] == m_ball.m_pass.m_runner_source)
 						return;
 
-					runner_start_dribble(m_actor_to_runner_idx[other_actor]);
+						runner_start_dribble(m_actor_to_runner_idx[other_actor]);
 				}
 			});
 		}
@@ -392,28 +558,32 @@ void gameman::tick_game(const tick_context & ctx)
 		} break;
 		case ball::state::dribble:
 		{
+			// ignore common collisions
 			actor(m_ball.m_actor).component<component::type::physics>()
 				->set_layer(collision_layers::common_ignored);
 
+			// clamp to owner position
 			const uint32 runner_idx = m_ball.m_dribble.m_runner_idx;
 			const runner& rnr = m_runners[runner_idx];
 			const float3 rnr_position = actor(rnr.m_actor).get_position();
 			actor(m_ball.m_actor).set_position(rnr_position);
+
 		} break;
 		case ball::state::passing:
 		{
+			// re-enable trigger collisions
 			actor(m_ball.m_actor).component<component::type::physics>()
 				->set_layer(collision_layers::common_trigger);
 
 			const uint32 source_rnr = m_ball.m_pass.m_runner_source;
 			const uint32 dest_rnr = m_ball.m_pass.m_runner_dest;
-			
+
 			const actor_id dst_actor = m_runners[dest_rnr].m_actor;
 			const actor_id src_actor = m_runners[source_rnr].m_actor;
 			const float3 delta = actor(dst_actor).get_position() - actor(m_ball.m_actor).get_position();
 			velocity = glm::normalize(delta) * cm_game_ball_pass_spd.get_value();
 		} break;
-		case ball::state::charging: 
+		case ball::state::charging:
 		{
 			actor(m_ball.m_actor).component<component::type::physics>()
 				->set_layer(collision_layers::common_ignored);
@@ -451,7 +621,7 @@ void gameman::tick_game(const tick_context & ctx)
 			foreach_collision(m_ball.m_actor, [this, enemy_goal](const comp_bounds& other_bounds) {
 				if (other_bounds.m_owner == enemy_goal)
 					reset(reset::game); // GOAL
-			});
+				});
 
 		}break;
 		}
@@ -463,6 +633,25 @@ void gameman::tick_game(const tick_context & ctx)
 			ball_physx->m_velocity = velocity;
 			ball_physx->m_drag_multiplier = 0.0f;
 		}
+	}
+
+	// camera logic
+	{
+		const float3 field_min = m_field.m_pitch_bounds.abs_min();
+		const float3 field_max = m_field.m_pitch_bounds.abs_max();
+		const float3 ball_position = actor(m_ball.m_actor).get_position();
+
+		float3 camera_position = actor(m_camera.m_actor).get_position();
+		camera_position.x += cm_game_camera_ball_offset_x.get_value();
+		camera_position.z -= cm_game_camera_ball_offset_z.get_value();
+
+		const float2 ball_normalized_position = m_field.normalize_position(ball_position);
+		const float2 camera_normalized_position = m_field.normalize_position(camera_position);
+		const float2 clamped_ball_position = glm::clamp(ball_normalized_position, float2(0.3f, 0.4f), float2(0.7f, 0.6f));
+		const float2 camera_movement = clamped_ball_position - camera_normalized_position;
+
+		if (glm::dot(camera_movement, camera_movement) > 0.001)
+			m_camera.m_movement_input += float3(camera_movement.x, 0.0f, camera_movement.y);
 	}
 
 	// AI logic
@@ -512,134 +701,111 @@ void gameman::tick_game(const tick_context & ctx)
 	}
 
 	// player logic
-	if (!devcontrols_enabled)
+	for (uint32 p = 0u; p < player::num; ++p)
 	{
-		for (uint32 p = 0u; p < player::num; ++p)
+		player& ply = m_players[p];
+		if (!ply.m_active)
 		{
-			player& ply = m_players[p];
-			if (!ply.m_active)
-				continue;
+			continue;
+		}
 
-			const uint32 team_idx = ply.m_team_idx;
-			const uint32 current_local_runner = ply.m_current_local_runner;
-			const uint32 runner_idx = get_global_runner_idx(team_idx, current_local_runner);
-			runner& rnr = m_runners[runner_idx];
-			float2 movement_input = {};
-			comp_movement* cmp_movement = actor(rnr.m_actor).component<component::type::movement>();
-			if (cmp_movement && !runner_has_ball_charge(runner_idx))
-			{
-				const float left = input.is_button_down(cm_controls_left.value().c_str());
-				const float fwd = input.is_button_down(cm_controls_up.value().c_str());
-				const float back = input.is_button_down(cm_controls_down.value().c_str());
-				const float right = input.is_button_down(cm_controls_right.value().c_str());
-				movement_input = float2(right - left, back - fwd);
-				cmp_movement->m_input = movement_input;
-			}
+		const uint32 team_idx = ply.m_team_idx;
+		const uint32 current_local_runner = ply.m_current_local_runner;
+		const uint32 runner_idx = get_runner_idx(team_idx, current_local_runner);
+		const runner& rnr = m_runners[runner_idx];
 
-			comp_physics* cmp_physics = actor(rnr.m_actor).component<component::type::physics>();
-			if (cmp_physics)
-			{
-				cmp_physics->m_maxspeed = cm_game_movement_mxsp.get_value();
-				if (runner_is_pass_dest(runner_idx))
-					cmp_physics->m_maxspeed *= 0.1f;
-			}
+		// figure out the movement input
+		float2 movement_input = {};
+		comp_movement* cmp_movement = actor(rnr.m_actor).component<component::type::movement>();
+		if (cmp_movement && !runner_has_ball_charge(runner_idx))
+		{
+			const float left = input.is_button_down(cm_controls_left.value().c_str());
+			const float fwd = input.is_button_down(cm_controls_up.value().c_str());
+			const float back = input.is_button_down(cm_controls_down.value().c_str());
+			const float right = input.is_button_down(cm_controls_right.value().c_str());
+			movement_input = float2(right - left, back - fwd);
+			cmp_movement->m_input = movement_input;
+		}
 
-			if (runner_can_pass(runner_idx)
-				&& input.is_button_down(cm_controls_pass.value().c_str()))
+		// adjust the maxspeed of the physics component
+		comp_physics* cmp_physics = actor(rnr.m_actor).component<component::type::physics>();
+		if (cmp_physics)
+		{
+			cmp_physics->m_maxspeed = cm_game_movement_mxsp.get_value();
+			if (runner_is_pass_dest(runner_idx))
+				cmp_physics->m_maxspeed *= 0.1f;
+		}
+
+		// process 'pass' input
+		if (runner_can_pass(runner_idx) && input.is_button_down(cm_controls_pass.value().c_str()))
+		{
+			// choose the next local_runner
+			uint32 next_local_runner = current_local_runner;
+			float next_local_runner_distance = FLT_MAX;
+			for (uint32 i = 0u; i < runner::num; ++i)
 			{
-				// choose the next local_runner
-				uint32 next_local_runner = current_local_runner;
-				float next_local_runner_distance = FLT_MAX;
-				for (uint32 i = 0u; i < runner::num; ++i)
+				if (i == current_local_runner)
+					continue;
+
+				const runner& nxt_rnr = get_runner_in_team(team_idx, i);
+				const runner& cr_rnr = get_runner_in_team(team_idx, current_local_runner);
+
+				const float3 current_to_next = actor(nxt_rnr.m_actor).get_position() - actor(cr_rnr.m_actor).get_position();
+				const float2 current_to_next_hor = float2(current_to_next.x, current_to_next.z);
+				const float2 input_delta = movement_input * 5.0f;
+				const float distance = glm::length(current_to_next_hor - input_delta);
+				if (distance < next_local_runner_distance)
 				{
-					if (i == current_local_runner)
-						continue;
-
-					const runner& nxt_rnr = get_runner_in_team(team_idx, i);
-					const runner& cr_rnr = get_runner_in_team(team_idx, current_local_runner);
-					float3 delta = actor(nxt_rnr.m_actor).get_position() - actor(cr_rnr.m_actor).get_position();
-					delta.y = 0.0f; // squash heigth, it doesn't matter here
-
-					const float input_add = 5.0f * glm::dot(delta, float3(-movement_input.x, 0.0f, movement_input.y));
-					const float distance = glm::length(delta) - input_add;
-					if (distance < next_local_runner_distance)
-					{
-						next_local_runner = i;
-						next_local_runner_distance = distance;
-					}
+					next_local_runner = i;
+					next_local_runner_distance = distance;
 				}
-
-				const uint32 next_runner = get_global_runner_idx(team_idx, next_local_runner);
-				runner_pass(runner_idx, next_runner);
-
-				ply.m_current_local_runner = next_local_runner;
 			}
 
-			if (runner_can_charge(runner_idx)
-				&& input.is_button_down(cm_controls_shoot.value().c_str()))
-			{
-				runner_charge(runner_idx);
-			}
+			const uint32 next_runner = get_runner_idx(team_idx, next_local_runner);
+			runner_pass(runner_idx, next_runner);
+
+			ply.m_current_local_runner = next_local_runner;
+		}
+
+		// process 'charge' input
+		if (runner_can_charge(runner_idx) && input.is_button_down(cm_controls_shoot.value().c_str()))
+		{
+			runner_charge(runner_idx);
 		}
 	}
 
-	// team logic
+	// team logic (cooldowns)
 	for (uint32 t = 0u; t < team::num; ++t)
 	{
 		m_teams[t].m_action_cooldown_timer -= ctx.delta_seconds;
-	}
-
-	// resolve dev-camera controls
-	if (devcontrols_enabled)
-	{
-		// move the camera
-		const float left = input.is_button_down(cm_camera_dev_left.value().c_str());
-		const float fwd = input.is_button_down(cm_camera_dev_forward.value().c_str());
-		const float back = input.is_button_down(cm_camera_dev_back.value().c_str());
-		const float right = input.is_button_down(cm_camera_dev_right.value().c_str());
-		const float up = input.is_button_down(cm_camera_dev_up.value().c_str());
-		const float down = input.is_button_down(cm_camera_dev_down.value().c_str());
-		const float sprint_multiplier = 1.0f + input.is_button_down(cm_camera_dev_sprint.value().c_str()) * 2;
-
-		float3 delta_horizontal =
-			(m_camera.m_transform.get_right() * (right - left)) +
-			(m_camera.m_transform.get_forward() * (fwd - back));
-		float3 delta_vertical =
-			(float3(0, 1, 0) * (up - down));
-
-		float3 delta_position = delta_horizontal + delta_vertical;
-		m_camera.m_velocity += delta_position * ctx.delta_seconds * cm_camera_acceleration.get_value();
-		m_camera.m_velocity = clamp_length(m_camera.m_velocity, cm_camera_maxspeed.get_value() * sprint_multiplier);
-		m_camera.m_transform.add_position_world(m_camera.m_velocity * ctx.delta_seconds);
-
-		// drag camera velocity
-		if (glm::dot(delta_position, delta_position) < 0.0001f)
-		{
-			m_camera.m_velocity *= 0.001f;
-		}
-
-		const float2 mouse_delta = input.get_mouse_delta();
-
-		if (input.is_button_down(inputman::button::rmouse) && glm::dot(mouse_delta, mouse_delta) > 0.001)
-		{
-			const float2 delta_rotation = float2(mouse_delta.y, mouse_delta.x) * ctx.delta_seconds * cm_camera_sensy.get_value();
-			m_camera.m_transform.add_rotation_camera(delta_rotation.y, delta_rotation.x);
-		}
-
-		if (input.is_button_down(cm_camera_dev_reset.value().c_str()))
-		{
-			reset(reset::camera);
-		}
-	}
-
-	if (input.is_button_down(cm_game_reset.value().c_str()))
-	{
-		reset(reset::game);
 	}
 }
 
 void gameman::tick_systems(const tick_context& ctx)
 {
+	// camera system
+	{
+		auto transform_world = actor(m_camera.m_actor).get_transform();
+		m_camera.m_velocity += m_camera.m_movement_input * ctx.delta_seconds * cm_camera_acceleration.get_value();
+		m_camera.m_velocity = clamp_length(m_camera.m_velocity, cm_camera_maxspeed.get_value() * (1 + m_camera.m_sprint));
+		transform_world.add_position(m_camera.m_velocity * ctx.delta_seconds);
+
+		const float2 delta_rotation = float2(-m_camera.m_orient_input.y, -m_camera.m_orient_input.x) * ctx.delta_seconds * cm_camera_sensy.get_value();
+		transform_world.add_rotation_camera(delta_rotation.y, delta_rotation.x);
+
+		// drag camera velocity
+		if (glm::dot(m_camera.m_movement_input, m_camera.m_movement_input) < 0.0001f)
+		{
+			m_camera.m_velocity *= 0.001f;
+		}
+
+		// finally set the transform
+		actor(m_camera.m_actor).set_transform(transform_world);
+
+		// reset input
+		m_camera.m_movement_input = {};
+	}
+
 	// resolve all movements
 	// components::movement -> components::physics
 	{
@@ -647,7 +813,7 @@ void gameman::tick_systems(const tick_context& ctx)
 		for (auto& cmp_movement : components<component::type::movement>())
 		{
 			const auto owner = cmp_movement.m_owner;
-			const float3 delta_movement = float3(-cmp_movement.m_input.x, 0, cmp_movement.m_input.y) * cm_game_movement_acc.get_value();
+			const float3 delta_movement = float3(cmp_movement.m_input.x, 0, cmp_movement.m_input.y) * cm_game_movement_acc.get_value();
 			const float any_movement = dot(delta_movement, delta_movement) > 0;
 
 			comp_physics* phys = actor(owner).component<component::type::physics>();
@@ -666,6 +832,15 @@ void gameman::tick_systems(const tick_context& ctx)
 
 			// reset input
 			cmp_movement.m_input = float2();
+		}
+	}
+
+	// animations system
+	{
+		PIXScopedEvent(0, "system_animations");
+		for (auto& animation : components<component::type::animation>())
+		{
+			animation.m_time += ctx.delta_seconds;
 		}
 	}
 
@@ -764,16 +939,14 @@ void gameman::tick_systems(const tick_context& ctx)
 
 void gameman::detect_collisions()
 {
-	m_collisionman.reset_colliders();
+	m_collisionman.reset_collisions();
 
-	// components::bounds: register all world aabbs (including deltaposition)
+	// register each bounds component's world aabb into the collisionman
 	for (auto& cmp_bounds : components<component::type::bounds>())
 	{
-		cmp_bounds.m_world_aabb = {};
+		const actor_id owner = cmp_bounds.m_owner;
 
-		actor_id owner = cmp_bounds.m_owner;
-
-		// get the deltapos of physics component if any
+		// if we have a physics component, grab that info
 		float3 deltapos_this_frame = {};
 		float3 velocity_this_frame = {};
 		float inverse_mass = 0.0f;
@@ -788,25 +961,11 @@ void gameman::detect_collisions()
 			mask = physics->m_collision_mask;
 		}
 
-		const box& box = cmp_bounds.m_box;
-		const float3 corners[8] = {
-			{ box.abs_min().x, box.abs_min().y, box.abs_min().z },
-			{ box.abs_max().x, box.abs_min().y, box.abs_min().z },
-			{ box.abs_max().x, box.abs_max().y, box.abs_min().z },
-			{ box.abs_min().x, box.abs_max().y, box.abs_min().z },
-			{ box.abs_min().x, box.abs_min().y, box.abs_max().z },
-			{ box.abs_max().x, box.abs_min().y, box.abs_max().z },
-			{ box.abs_max().x, box.abs_max().y, box.abs_max().z },
-			{ box.abs_min().x, box.abs_max().y, box.abs_max().z },
-		};
-
+		// calculate the world aabb for this bounds
 		const auto& transform = actor(cmp_bounds.m_owner).get_transform(space::world);
-		cmp_bounds.m_world_aabb.m_position = transform.get_position() + deltapos_this_frame;
-		for (uint32 i = 0u; i < 8; ++i)
-		{
-			cmp_bounds.m_world_aabb.grow_to_fit(transform.m_matrix * float4(corners[i], 1));
-		}
+		cmp_bounds.m_world_aabb = box::transformed_aabb(cmp_bounds.m_box, transform, transform.get_position() + deltapos_this_frame);
 
+		// write the collider into the collisionman
 		m_collisionman.write_collider(cmp_bounds.m_id, collisionman::collider_builder()
 			.aabb(cmp_bounds.m_world_aabb)
 			.inv_mass(inverse_mass)
@@ -815,6 +974,7 @@ void gameman::detect_collisions()
 			.dbg_tag(actor(owner).get_name())
 		);
 	}
+	
 	m_collisionman.detect_collisions();
 }
 
@@ -822,33 +982,20 @@ void gameman::build_renderscene(contentman& cman, renderscene& scene)
 {
 	PIXScopedEvent(0, "build_renderscene");
 
-	// setup camera
-	{
-		scene.m_camera.m_near = 0.001f;
-		scene.m_camera.m_far = 1000.0f;
-		scene.m_camera.m_fov = 1;
-		scene.m_camera.m_transform = m_camera.m_transform;
-
-		// use camera ASSET to guide camera settings
-		camera_asset const* camera_asset = cman.find_camera(m_camera.m_asset_id);
-		if (camera_asset && false)
-		{
-			scene.m_camera.m_near = camera_asset->m_clip_near;
-			scene.m_camera.m_far = camera_asset->m_clip_far;
-
-			// we use vertical
-			const float ar = 1280.0f / 720.f;
-			const float vert_fov = 2 * glm::atan(glm::tan(camera_asset->m_fov_horizontal * 0.5f) / ar);
-			scene.m_camera.m_fov = 1.0f / vert_fov;
-		}
-	}
+	// update camera
+	scene.m_camera = m_camera.m_camera;
+	scene.m_camera_transform = actor(m_camera.m_actor).get_transform();
 	
 	// setup directional light
 	{
-		scene.m_light.m_color = m_light.m_color;
-		scene.m_light.m_transform = m_light.m_transform;
-		scene.m_light.m_frustrum = box::unit(cm_gfx_shadowfrustrum_size.get_value());
-		scene.m_light.m_shadowmap_resolution = uint2(1, 1) * cm_gfx_shadowmap_size.get_value<uint32>();
+		comp_light* light_comp = actor(m_lights.m_actor_directional).component<component::type::light>();
+		if (light_comp)
+		{
+			scene.m_light.m_color = float4(light_comp->m_light.m_color_diffuse, 1);
+			scene.m_light.m_transform = actor(m_lights.m_actor_directional).get_transform();
+			scene.m_light.m_frustrum = box::unit(cm_gfx_shadowfrustrum_size.get_value());
+			scene.m_light.m_shadowmap_resolution = uint2(1, 1) * cm_gfx_shadowmap_size.get_value<uint32>();
+		}
 	}
 	
 	// draw meshes
@@ -862,25 +1009,26 @@ void gameman::build_renderscene(contentman& cman, renderscene& scene)
 		// draw the pawn mesh instance
 		const mesh_id meshid = cmp_render.m_mesh;
 		mesh_asset const* mesh = cman.find_mesh(meshid);
-		if (!mesh)
-		{
+		if (!mesh) {
 			continue;
 		}
-
+		
 		auto& mesh_instance = scene.add_mesh_instance(meshid, shader::slot::shaded);
 		mesh_instance.m_transform = transform;
 		mesh_instance.apply_material(cman, cman.get_mesh_material_id(meshid));
 
-		const skel_id skelid = mesh->m_skeleton_id;
-		vector<anim_id> compatible_animations{};
-		if (cman.find_compatible_animations(skelid, compatible_animations) && !compatible_animations.empty())
+		auto* skel_comp = actor(cmp_render.m_owner).component<component::type::skeleton>();
+		if (skel_comp && skel_comp->m_skeleton != k_id_invalid)
 		{
-			mesh_instance.m_animation = compatible_animations[0];
+			mesh_instance.m_skeleton = skel_comp->m_skeleton;
 		}
 
-		if (skelid != k_id_invalid)
+		auto* anim_comp = actor(cmp_render.m_owner).component<component::type::animation>();
+		if (anim_comp && anim_comp->m_animation != k_id_invalid)
 		{
-			mesh_instance.m_skeleton = skelid;
+			const anim_id animid = anim_comp->m_animation;
+			mesh_instance.m_animation = anim_comp->m_animation;
+			mesh_instance.m_time = anim_comp->m_time * cm_anim_speed.get_value();
 		}
 	}
 
@@ -902,7 +1050,7 @@ void gameman::build_renderscene(contentman& cman, renderscene& scene)
 		quad.m_color = float4(1, 1, 1, 1);
 		quad.m_transform = transform::identity();
 
-		const float3 forward = quad.m_transform.get_position() - m_camera.m_transform.get_position();
+		const float3 forward = quad.m_transform.get_position() - actor(m_camera.m_actor).get_position();
 		quad.m_transform.look_twd(forward);
 		quad.m_transform.set_position(actor(m_runners[r].m_actor).get_position() + float3(0,2,0));
 	}
@@ -930,12 +1078,18 @@ void gameman::build_renderscene(contentman& cman, renderscene& scene)
 			}
 
 			lines.add_box(transform::identity(), cmp_bounds.m_world_aabb, bounds_color);
+
+			lines.add_box(transform::identity(), m_field.m_pitch_bounds, colors::green());
 		}
 
 		// transforms
-		if (cm_draw_dbg_transforms.enabled())
+		if (cm_draw_dbg_axis.enabled())
 		{
 			lines.add_transform(transform::identity());
+		}
+
+		if (cm_draw_dbg_transforms.enabled())
+		{
 			for (const auto& trans_id : m_transman.get_transforms())
 			{
 				lines.add_transform(m_transman.get_transform(trans_id, space::world));
@@ -971,6 +1125,7 @@ void gameman::build_renderscene(contentman& cman, renderscene& scene)
 	}
 }
 
+#pragma region ugly_actor_interface
 const string& gameman::actor_scope::get_name() const {
 	return m_owner.get_actor(m_id).m_name;
 }
@@ -1022,7 +1177,7 @@ const gameman::actor_scope& gameman::actor_scope::set_scale(const float3& scale,
 	m_owner.m_transman.set_scale(trid, scale, spc);
 	return *this;
 }
-const gameman::actor_scope& gameman::actor_scope::add_position(const float3& delta, space spc) const {
+const gameman::actor_scope& gameman::actor_scope::add_position(const float3& delta, space spc = space::world) const {
 	trans_id trid = get_transform_id();
 	m_owner.m_transman.add_position(trid, delta, spc);
 	return *this;
@@ -1037,5 +1192,11 @@ const gameman::actor_scope& gameman::actor_scope::multiply_scale(const float3& m
 	m_owner.m_transman.mult_scale(trid, multiplier, spc);
 	return *this;
 }
+const gameman::actor_scope& gameman::actor_scope::reset_transform() const
+{
+	m_owner.m_transman.reset(get_transform_id());
+	return *this;
+}
+#pragma endregion
 }
 

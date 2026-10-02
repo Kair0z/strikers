@@ -1,5 +1,5 @@
 # camera
-camera_dev_control  1;
+camera_dev_control  0;
 camera_dev_reset    r;
 camera_dev_left     a;
 camera_dev_right    d;
@@ -16,6 +16,7 @@ camera_acceleration 100000000;
 log_fps 0;
 log_clear 0;
 log_commands 0;
+log_content 0;
 
 # game
 game_reset k;
@@ -28,6 +29,9 @@ game_movement_mxsp 6;
 game_ball_pass_spd 25;
 game_ball_shot_spd 55;
 game_ball_mxsp -1;
+
+# animation
+cm_anim_speed 5;
 
 # AI
 game_ai 0;
@@ -42,6 +46,8 @@ phx_gravity_enabled 0;
 # draw
 draw_dbg 1;
 draw_dbg_bounds 1;
+draw_dbg_axis 1;
+draw_dbg_transforms 0;
 draw_dbg_ball 0;
 
 # graphics

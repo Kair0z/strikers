@@ -16,6 +16,9 @@ struct component
 		physics,
 		bounds,
 		render,
+		animation,
+		skeleton,
+		light,
 		renderui,
 		movement,	// only attached to actors ON the pitch
 		brain,		// AI decision component
@@ -82,6 +85,21 @@ struct comp_render final : public detail::component_t<component::type::render>
 	mat_id m_material;
 };
 
+struct comp_animation final : public detail::component_t<component::type::animation>
+{
+	anim_id m_animation;
+	float m_time;
+};
+struct comp_skeleton final : public detail::component_t<component::type::skeleton>
+{
+	skel_id m_skeleton;
+};
+
+struct comp_light final : public detail::component_t<component::type::light>
+{
+	light m_light;
+};
+
 struct comp_ui final : public detail::component_t<component::type::renderui>
 {
 	
@@ -103,7 +121,52 @@ using component_t = std::tuple_element_t<static_cast<uint64>(_t), std::tuple<
 	comp_physics,
 	comp_bounds,
 	comp_render,
+	comp_animation,
+	comp_skeleton,
+	comp_light,
 	comp_ui,
 	comp_movement,
 	comp_brain>>;
+
+struct component_collection
+{
+	template <component::type _t>
+	using component_array = vector<component_t<_t>>;
+	component_array<component::type::physics> m_physics;
+	component_array<component::type::bounds> m_bounds;
+	component_array<component::type::render> m_renders;
+	component_array<component::type::renderui> m_renderuis;
+	component_array<component::type::movement> m_movements;
+	component_array<component::type::brain> m_brains;
+	component_array<component::type::animation> m_animations;
+	component_array<component::type::skeleton> m_skeletons;
+	component_array<component::type::light> m_lights;
+
+	template <component::type _t>
+	component_array<_t>& components()
+	{
+		if constexpr (_t == component::type::physics) return m_physics;
+		else if constexpr (_t == component::type::bounds) return m_bounds;
+		else if constexpr (_t == component::type::render) return m_renders;
+		else if constexpr (_t == component::type::renderui) return m_renderuis;
+		else if constexpr (_t == component::type::movement) return m_movements;
+		else if constexpr (_t == component::type::brain) return m_brains;
+		else if constexpr (_t == component::type::animation) return m_animations;
+		else if constexpr (_t == component::type::skeleton) return m_skeletons;
+		else if constexpr (_t == component::type::light) return m_lights;
+	}
+
+	template <component::type _t>
+	const component_array<_t>& components() const
+	{
+		if constexpr (_t == component::type::physics) return m_physics;
+		else if constexpr (_t == component::type::bounds) return m_bounds;
+		else if constexpr (_t == component::type::render) return m_renders;
+		else if constexpr (_t == component::type::renderui) return m_renderuis;
+		else if constexpr (_t == component::type::movement) return m_movements;
+		else if constexpr (_t == component::type::brain) return m_brains;
+		else if constexpr (_t == component::type::skeleton) return m_skeletons;
+		else if constexpr (_t == component::type::light) return m_lights;
+	}
+};
 }
