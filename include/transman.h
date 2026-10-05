@@ -88,5 +88,16 @@ public:
 	void reset(trans_id id);
 
 	vector<trans_id> get_transforms() const;
+	trans_id get_parent(trans_id transform) const
+	{
+		return m_graph.parent(transform);
+	}
+
+	template <typename _func>
+	void traverse(trans_id root, _func&& func) {
+		m_graph.traverse([this, &func](transform_id child, transform_id parent){
+			func(child);
+		}, root, graph::traverse_mode::width);
+	}
 };
 }

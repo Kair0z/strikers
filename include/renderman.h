@@ -99,6 +99,15 @@ struct modelshader
 	};
 };
 
+struct render_bitflags
+{
+	enum flags
+	{
+		none = 0,
+		outline = (1 << 0)
+	};
+};
+
 class renderscene final
 {
 public:
@@ -142,6 +151,7 @@ public:
 		uint32 			m_shader				= modelshader::shaded;
 		image_id		m_img_basecolor			= k_id_invalid;
 		anim_id			m_animation				= k_id_invalid;
+		uint32			m_bitflags				= render_bitflags::none;
 
 		void apply_material(const contentman& cman, const mat_id mat);
 		mesh_instance& transform(const transform& trans)
@@ -518,6 +528,9 @@ struct gpu_resource
 		builder& texture2D(uint32 x, uint32 y) {
 			return type(type::texture).size_x(x).size_y(y);
 		}
+		builder& texture2D(const uint2& xy) { 
+			return texture2D(xy.x, xy.y); 
+		}
 
 		template <typename _t>
 		builder& buffer_with_num(uint32 num) {
@@ -692,6 +705,23 @@ class renderman final
 		descriptor m_srv;
 	};
 	shadowmap m_shadows;
+	struct bitmap
+	{
+		gpu_resource m_resource;
+		descriptor m_uav;
+		descriptor m_srv;
+	};
+	bitmap m_bitmap;
+	struct scenecolor
+	{
+		gpu_resource m_resource_color;
+		gpu_resource m_resource_depth;
+		descriptor m_uav;
+		descriptor m_srv;
+		descriptor m_rtv;
+		descriptor m_dsv;
+	};
+	scenecolor m_scenecolor;
 
 	struct swapchain final
 	{
@@ -797,6 +827,7 @@ class renderman final
 		{
 			// compute begin
 			skinning,
+			outline,
 			// graphics begin
 			shadows,
 			shading,

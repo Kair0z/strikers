@@ -228,7 +228,7 @@ void gameman::start(const contentman& cman)
 					->set_mass(1.0f)
 					.set_layer(collision_layers::common);
 			}
-			if (builder.m_flags & important_info_builder::runner)
+			if (builder.m_flags& important_info_builder::runner)
 			{
 				actor(main_actor).add_component<component::type::physics>();
 				actor(main_actor).add_component<component::type::movement>();
@@ -339,54 +339,54 @@ void gameman::start(const contentman& cman)
 			character_runner::type character_runner = character_runner::num;
 			character_goalie::type character_goalie = character_goalie::num;
 			for (uint32 c = 0u; c < character_runner::num; ++c)
+			{
+				if (strstr(current_node.m_name.c_str(), character_runner::get_name((character_runner::type)c)))
 				{
-					if (strstr(current_node.m_name.c_str(), character_runner::get_name((character_runner::type)c)))
-					{
-						character_runner = (character_runner::type)c;
-					}
+					character_runner = (character_runner::type)c;
 				}
+			}
 			for (uint32 c = 0u; c < character_goalie::num; ++c)
+			{
+				if (strstr(current_node.m_name.c_str(), character_goalie::get_name((character_goalie::type)c)))
 				{
-					if (strstr(current_node.m_name.c_str(), character_goalie::get_name((character_goalie::type)c)))
-					{
-						character_goalie = (character_goalie::type)c;
-					}
+					character_goalie = (character_goalie::type)c;
 				}
+			}
 
 			// if character_runner, instantiate for each runner with that character (and return)
 			if (character_runner != character_runner::num)
-				{
-					for (uint32 t = 0u; t < team::num; ++t)
-						for (uint32 r = 0u; r < runner::num; ++r)
-						{
-							runner& rnr = m_runners[get_runner_idx(t, r)];
-							if (rnr.m_character == character_runner && rnr.m_actor == k_actor_invalid)
-							{
-								rnr.m_actor = instantiate_actor(node_id, parent_actor, important_info_builder()
-									.name(current_node.m_name.c_str())
-									.as_runner(character_runner)
-								);
-							}
-						}
-					return;
-				}
-
-			// if character_goalie, instantiate for each goalie with that character (and return)
-			if (character_goalie != character_goalie::num)
-				{
-					for (uint32 t = 0u; t < team::num; ++t)
+			{
+				for (uint32 t = 0u; t < team::num; ++t)
+					for (uint32 r = 0u; r < runner::num; ++r)
 					{
-						goalie& goalie = m_goalies[t];
-						if (goalie.m_character == character_goalie && goalie.m_actor == k_actor_invalid)
+						runner& rnr = m_runners[get_runner_idx(t, r)];
+						if (rnr.m_character == character_runner && rnr.m_actor == k_actor_invalid)
 						{
-							goalie.m_actor = instantiate_actor(node_id, parent_actor, important_info_builder()
+							rnr.m_actor = instantiate_actor(node_id, parent_actor, important_info_builder()
 								.name(current_node.m_name.c_str())
-								.as_goalie(character_goalie)
+								.as_runner(character_runner)
 							);
 						}
 					}
-					return;
+				return;
+			}
+
+			// if character_goalie, instantiate for each goalie with that character (and return)
+			if (character_goalie != character_goalie::num)
+			{
+				for (uint32 t = 0u; t < team::num; ++t)
+				{
+					goalie& goalie = m_goalies[t];
+					if (goalie.m_character == character_goalie && goalie.m_actor == k_actor_invalid)
+					{
+						goalie.m_actor = instantiate_actor(node_id, parent_actor, important_info_builder()
+							.name(current_node.m_name.c_str())
+							.as_goalie(character_goalie)
+						);
+					}
 				}
+				return;
+			}
 
 			instantiate_actor(node_id, parent_actor, important_info_builder()
 				.name(current_node.m_name.c_str())
@@ -397,10 +397,15 @@ void gameman::start(const contentman& cman)
 		for (uint32 r = 0u; r < team::num * runner::num; ++r)
 		{
 			const runner& rnr = m_runners[r];
-			m_actor_to_runner_idx[rnr.m_actor] = r;
 			actor(rnr.m_actor)
 				.set_position(rnr.m_start_transform.get_position(), space::world)
 				.set_rotation(rnr.m_start_transform.get_rotation(), space::world);
+
+			// register the actor (and its children) to the runner collection
+			m_actor_to_runner_idx[rnr.m_actor] = r;
+			actor(rnr.m_actor).traverse_children([this, r](actor_id child){
+				m_actor_to_runner_idx[child] = r;
+			});
 		}
 		for (uint32 t = 0u; t < team::num; ++t)
 		{
@@ -1001,28 +1006,32 @@ void gameman::build_renderscene(contentman& cman, renderscene& scene)
 	// draw meshes
 	for (const auto& cmp_render : components<component::type::render>())
 	{
-		if (!actor(cmp_render.m_owner).is_active())
-			continue;
+		const actor_id parent_actor = actor(cmp_render.m_owner).get_parent();
 
-		const auto& transform = actor(cmp_render.m_owner).get_transform(space::world);
-
-		// draw the pawn mesh instance
-		const mesh_id meshid = cmp_render.m_mesh;
-		mesh_asset const* mesh = cman.find_mesh(meshid);
-		if (!mesh) {
+		if (!actor(parent_actor).is_active())
 			continue;
-		}
 		
+		const mesh_id meshid = cmp_render.m_mesh;
 		auto& mesh_instance = scene.add_mesh_instance(meshid, modelshader::slot::shaded);
+		const auto& transform = actor(cmp_render.m_owner).get_transform(space::world);
 		mesh_instance.m_transform = transform;
 		mesh_instance.apply_material(cman, cman.get_mesh_material_id(meshid));
 
+		// draw outline
+		const bool is_runner = m_actor_to_runner_idx.contains(parent_actor);
+		if (is_runner && is_runner_controlled_by_player(m_actor_to_runner_idx[parent_actor]))
+		{
+			mesh_instance.m_bitflags = render_bitflags::outline;
+		}
+
+		// attach skeleton
 		auto* skel_comp = actor(cmp_render.m_owner).component<component::type::skeleton>();
 		if (skel_comp && skel_comp->m_skeleton != k_id_invalid)
 		{
 			mesh_instance.m_skeleton = skel_comp->m_skeleton;
 		}
 
+		// attach animation
 		auto* anim_comp = actor(cmp_render.m_owner).component<component::type::animation>();
 		if (anim_comp && anim_comp->m_animation != k_id_invalid)
 		{
@@ -1030,29 +1039,6 @@ void gameman::build_renderscene(contentman& cman, renderscene& scene)
 			mesh_instance.m_animation = anim_comp->m_animation;
 			mesh_instance.m_time = anim_comp->m_time * cm_anim_speed.get_value();
 		}
-	}
-
-	// draw quads
-	for (uint32 r = 0u; r < runner::num * team::num; ++r) 
-	{
-		if (!is_runner_controlled_by_player(r))
-			continue;
-
-		auto& quad = scene.add_quad_instance();
-
-		image_id font_image{};
-		rect font_uv_rect{};
-		if (fontman::get().parse_font(cman, DF_MAIN_FONT, '1', font_image, font_uv_rect))
-		{
-			quad.m_rect_uv = font_uv_rect;
-			quad.m_image = font_image;
-		}
-		quad.m_color = float4(1, 1, 1, 1);
-		quad.m_transform = transform::identity();
-
-		const float3 forward = quad.m_transform.get_position() - actor(m_camera.m_actor).get_position();
-		quad.m_transform.look_twd(forward);
-		quad.m_transform.set_position(actor(m_runners[r].m_actor).get_position() + float3(0,2,0));
 	}
 
 	// draw debug lines

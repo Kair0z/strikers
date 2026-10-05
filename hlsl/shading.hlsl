@@ -7,8 +7,7 @@
     "CBV(b0),"\
     "CBV(b1),"\
     "SRV(t0),"\
-    "SRV(t1)"
-
+    "SRV(t1),"
 #include "frontend.hlsl"
 
 struct ps_input
@@ -19,6 +18,7 @@ struct ps_input
     float3 normal_ws : NORMAL0;
     float2 uv : TEXCOORD0;
     int texid_basecolor : TEXCOORD1;
+    uint bitflags : TEXCOORD2;
 };
 ConstantBuffer<cbuffer_global>      c_global            : register(b0);
 ConstantBuffer<cbuffer_view>        c_view              : register(b1);
@@ -49,6 +49,7 @@ ps_input main_vs(mesh_vertex input, uint instance_id : SV_InstanceID, uint start
     output.normal_ws = normalize(mul((float3x3)instance.transform, input.normal));
     output.uv = input.uv;
     output.texid_basecolor = instance.texid_basecolor;
+    output.bitflags = instance.bitflags;
     return output;
 }
 
@@ -100,6 +101,13 @@ float4 main_ps(ps_input input) : SV_Target0
 
         const float2 uv = clamp(input.uv, float2(0.01, 0.01), float2(0.99, 0.99));
         basecolor *= tex_basecolor[uv * float2(width, height)];
+    }
+
+    // write to the bitmap
+    if (c_global.texid_bitmap_uav != k_invalid)
+    {
+        RWTexture2D<uint> bitmap = ResourceDescriptorHeap[c_global.texid_bitmap_uav];
+        bitmap[input.position_cs.xy].r = input.bitflags;
     }
 
     return float4(saturate((basecolor * diffuse * shadow) + ambient), 1);

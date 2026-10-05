@@ -6,7 +6,6 @@
     "CBV(b0),"\
     "SRV(t0),"\
     "SRV(t1)"
-
 #include "frontend.hlsl"
 
 ConstantBuffer<cbuffer_view>    c_view      : register(b0);

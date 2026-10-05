@@ -2,6 +2,7 @@
 #ifdef __cplusplus
 namespace hlsl {
 using uint = uint32;
+using uint2 = strikers::uint2;
 struct gpu_optional // default initializes -1
 {
 	int32 m_value = -1;
@@ -44,6 +45,7 @@ struct mesh_instance
     float4          color;
     gpu_optional    bone_instance_offset;
     gpu_optional    texid_basecolor;
+    uint            bitflags;
 };
 
 // each skeleton is an array of bones, and each skeleton can have multiple instances
@@ -107,12 +109,16 @@ struct cbuffer_global
     float4 light_color;
     float4 light_direction;
     gpu_optional texid_shadows;
+    gpu_optional texid_bitmap_uav;
+    gpu_optional texid_scenecolor_uav;
     uint num_bone_instances;
+    float4 outline_params; // a is enabled / not enabled
 };
 
 struct cbuffer_view
 {
     float4x4 viewprojection;
+    uint2 screen_size;
 };
 
 #ifndef __cplusplus
@@ -129,6 +135,12 @@ float4 calculate_skinned_position(
         bone_weights.z * mul(bone_instances[bone_instance_offset + bone_idxs.z].skinned_matrix, float4(in_position.xyz, 1)) +
         bone_weights.w * mul(bone_instances[bone_instance_offset + bone_idxs.w].skinned_matrix, float4(in_position.xyz, 1));
 }
+
+enum bitflags
+{
+    none = 0,
+    outline = (1 << 0)
+};
 #endif
 
 #if __cplusplus

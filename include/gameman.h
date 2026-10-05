@@ -417,6 +417,7 @@ private:
 	component_collection m_components;
 	transman m_transman;
 	collisionman m_collisionman;
+	umap<trans_id, actor_id> m_transform_to_actor;
 
 	actor_id create_actor(const actor_id parent = k_actor_invalid)
 	{
@@ -432,6 +433,7 @@ private:
 		{
 			new_actor.m_transform_id = m_transman.add_world_transform(transform::identity(), m_actors[parent].m_transform_id);
 		}
+		m_transform_to_actor[new_actor.m_transform_id] = new_id;
 		return new_id;
 	}
 
@@ -494,6 +496,23 @@ private:
 		const actor_scope& add_rotation(const rotation& delta, space spc) const;
 		const actor_scope& multiply_scale(const float3& multiplier, space spc) const;
 		const actor_scope& reset_transform() const;
+
+		template <typename _func>
+		void traverse_children(_func&& func) {
+			trans_id trid = get_transform_id();
+			m_owner.m_transman.traverse(trid, [this, &func](const trans_id id)
+			{
+				actor_id actor = m_owner.m_transform_to_actor.at(id);
+				func(actor);
+			});
+		}
+
+		actor_id get_parent() const
+		{
+			trans_id trid = get_transform_id();
+			trans_id parent_trid = m_owner.m_transman.get_parent(trid);
+			return m_owner.m_transform_to_actor.at(parent_trid);
+		}
 
 		bool has_component(component::type type) const {
 			return m_owner.get_actor(m_id).has_component(type);

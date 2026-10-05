@@ -13,6 +13,7 @@ static const char* k_ui_shader_filepath			= DF_FOLDER_SHADERS "ui.hlsl";
 static const char* k_shadows_shader_filepath	= DF_FOLDER_SHADERS "shadows.hlsl";
 static const char* k_shading_shader_filepath	= DF_FOLDER_SHADERS "shading.hlsl";
 static const char* k_skinning_shader_filepath	= DF_FOLDER_SHADERS "skinning.hlsl";
+static const char* k_outline_shader_filepath	= DF_FOLDER_SHADERS "outline.hlsl";
 static const char* k_lines_shader_filepath		= DF_FOLDER_SHADERS "lines.hlsl";
 static const char* k_quads_shader_filepath		= DF_FOLDER_SHADERS "quads.hlsl";
 static const char* k_shader_include_folder		= "D:/Git/strikers/hlsl";
@@ -189,6 +190,12 @@ result<> renderman::initialize_pipelines()
 	{
 		m_pipelines[pipeline::skinning] = pipeline(pipeline::builder()
 			.filepath(k_skinning_shader_filepath)
+			.entrypoint(shader::cs, k_cs_entry)
+			.target(shader::cs, k_cs_target)
+		);
+
+		m_pipelines[pipeline::outline] = pipeline(pipeline::builder()
+			.filepath(k_outline_shader_filepath)
 			.entrypoint(shader::cs, k_cs_entry)
 			.target(shader::cs, k_cs_target)
 		);
@@ -422,7 +429,8 @@ result<> renderman::initialize()
 		static D3D12_MESSAGE_ID deny_ids[]
 		{
 			D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
-			D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE
+			D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE,
+			D3D12_MESSAGE_ID_CREATERESOURCE_STATE_IGNORED
 		};
 		static D3D12_MESSAGE_SEVERITY deny_sevs[]
 		{
@@ -527,6 +535,56 @@ result<> renderman::initialize()
 		m_dummies.m_buffer = gpu_resource::allocate(*m_device, gpu_resource::builder()
 			.buffer_single(sizeof(float) * 16)
 			.create_flags(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+		).claim();
+	}
+
+	const uint2 scenecolor_resolution = { 1280, 720 };
+
+	// allocate bitmap
+	{
+		m_bitmap.m_resource = gpu_resource::allocate(*m_device, gpu_resource::builder()
+			.texture2D(scenecolor_resolution)
+			.create_flags(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+			.format(DXGI_FORMAT_R8_TYPELESS)
+		).claim();
+		m_bitmap.m_uav = create_resource_descriptor(m_bitmap.m_resource, descriptor::builder()
+			.type(descriptor::uav)
+			.format(DXGI_FORMAT_R8_UINT)
+		).claim();
+		m_bitmap.m_srv = create_resource_descriptor(m_bitmap.m_resource, descriptor::builder()
+			.type(descriptor::srv)
+			.format(DXGI_FORMAT_R8_UINT)
+		).claim();
+	}
+	// allocate scenecolor
+	{
+		
+		m_scenecolor.m_resource_color = gpu_resource::allocate(*m_device, gpu_resource::builder()
+			.texture2D(scenecolor_resolution)
+			.create_flags(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
+			.format(DXGI_FORMAT_R8G8B8A8_UNORM)
+		).claim();
+		m_scenecolor.m_resource_depth = gpu_resource::allocate(*m_device, gpu_resource::builder()
+			.texture2D(scenecolor_resolution)
+			.create_flags(D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
+			.format(DXGI_FORMAT_D32_FLOAT)
+		).claim();
+
+		m_scenecolor.m_uav = create_resource_descriptor(m_scenecolor.m_resource_color, descriptor::builder()
+			.type(descriptor::uav)
+			.format(DXGI_FORMAT_R8G8B8A8_UNORM)
+		).claim();
+		m_scenecolor.m_srv = create_resource_descriptor(m_scenecolor.m_resource_color, descriptor::builder()
+			.type(descriptor::srv)
+			.format(DXGI_FORMAT_R8G8B8A8_UNORM)
+		).claim();
+		m_scenecolor.m_rtv = create_resource_descriptor(m_scenecolor.m_resource_color, descriptor::builder()
+			.type(descriptor::rtv)
+			.format(DXGI_FORMAT_R8G8B8A8_UNORM)
+		).claim();
+		m_scenecolor.m_dsv = create_resource_descriptor(m_scenecolor.m_resource_depth, descriptor::builder()
+			.type(descriptor::dsv)
+			.format(DXGI_FORMAT_D32_FLOAT)
 		).claim();
 	}
 
@@ -636,7 +694,6 @@ void renderman::render(renderscene& scene, const contentman& cman)
 	gpu_resource& bone_instance_buffer = *gpu_resource_with_fallback(m_bone_buffers.m_bone_instance_buffer).claim();
 	gpu_resource& anim_channels_buffer = *gpu_resource_with_fallback(m_anim_buffers.m_buffers[animation_buffers::channels]).claim();
 	gpu_resource& anim_keyframes_buffer = *gpu_resource_with_fallback(m_bone_buffers.m_bone_instance_buffer).claim();
-
 	state_barrier(bone_instance_buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 	state_barrier(anim_channels_buffer, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
 	state_barrier(anim_keyframes_buffer, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
@@ -658,7 +715,7 @@ void renderman::render(renderscene& scene, const contentman& cman)
 		m_cmdlist->Dispatch(num_groups, 1, 1);
 	}
 	state_barrier(bone_instance_buffer, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-
+	
 	const descheap& rtv_heap = get_descheap(descriptor_heap::rtv);
 	const descheap& dsv_heap = get_descheap(descriptor_heap::dsv);
 
@@ -709,16 +766,13 @@ void renderman::render(renderscene& scene, const contentman& cman)
 		state_barrier(m_shadows.m_resource, D3D12_RESOURCE_STATE_DEPTH_READ);
 	}
 
-	// [backbuffer rendering]
+	// [scenecolor rendering]
+	state_barrier(m_scenecolor.m_resource_color, D3D12_RESOURCE_STATE_RENDER_TARGET);
+	state_barrier(m_scenecolor.m_resource_depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 	{
-		gpu_resource& current_backbuffer = swapchain.get_current_backbuffer_resource();
-		const descriptor& current_backbuffer_rtv = swapchain.get_current_backbuffer_rtv();
-		
 		D3D12_CPU_DESCRIPTOR_HANDLE backbuffer_rtv_handle, backbuffer_dsv_handle;
-		rtv_heap.get_handles(current_backbuffer_rtv.m_heap_idx, &backbuffer_rtv_handle).claim();
-		dsv_heap.get_handles(swapchain.m_dsv.m_heap_idx, &backbuffer_dsv_handle).claim();
-
-		state_barrier(current_backbuffer, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		rtv_heap.get_handles(m_scenecolor.m_rtv.m_heap_idx, &backbuffer_rtv_handle).claim();
+		dsv_heap.get_handles(m_scenecolor.m_dsv.m_heap_idx, &backbuffer_dsv_handle).claim();
 
 		D3D12_VIEWPORT viewport{};
 		viewport.Height = (float)backbuffer_size.y;
@@ -737,6 +791,8 @@ void renderman::render(renderscene& scene, const contentman& cman)
 		m_cmdlist->OMSetRenderTargets(1, &backbuffer_rtv_handle, true, &backbuffer_dsv_handle);
 		m_cmdlist->RSSetViewports(1, &viewport);
 		m_cmdlist->RSSetScissorRects(1, &scissor);
+
+		state_barrier(m_bitmap.m_resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
 		// mesh passes
 		// > pip_shading
@@ -767,7 +823,7 @@ void renderman::render(renderscene& scene, const contentman& cman)
 				m_cmdlist->SetGraphicsRootConstantBufferView(1, m_cbuffers.resource(cbuffer::view, view::main).gpu_address());
 				m_cmdlist->SetGraphicsRootShaderResourceView(2, m_instancebuffer.gpu_address());
 				m_cmdlist->SetGraphicsRootShaderResourceView(3, bone_instance_buffer.gpu_address());
-				
+
 				// render the mesh batches only that match the current shader
 				render_meshbatches(scene, cman, meshbatch_filter()
 					.shader_equal((shader::slot)i));
@@ -780,7 +836,7 @@ void renderman::render(renderscene& scene, const contentman& cman)
 			PIXScopedEvent(m_cmdlist, 0u, "lines");
 			m_cmdlist->SetPipelineState(m_pipelines[pipeline::lines].m_dxpipeline);
 			m_cmdlist->SetGraphicsRootSignature(m_pipelines[pipeline::lines].m_dxsignature);
-
+		
 			// update lines instance buffer
 			const uint32 num_instances = (uint32)scene.m_line_instances.size();
 			m_cmdlist->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_LINELIST);
@@ -796,7 +852,7 @@ void renderman::render(renderscene& scene, const contentman& cman)
 			PIXScopedEvent(m_cmdlist, 0u, "quads");
 			m_cmdlist->SetPipelineState(m_pipelines[pipeline::quads].m_dxpipeline);
 			m_cmdlist->SetGraphicsRootSignature(m_pipelines[pipeline::quads].m_dxsignature);
-
+		
 			const uint32 num_instances = (uint32)scene.m_quad_instances.size();
 			m_cmdlist->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 			m_cmdlist->SetGraphicsRootConstantBufferView(0, m_cbuffers.resource(cbuffer::global).m_resource->GetGPUVirtualAddress());
@@ -809,7 +865,7 @@ void renderman::render(renderscene& scene, const contentman& cman)
 		if (!scene.m_ui_instances.empty())
 		{
 			PIXScopedEvent(m_cmdlist, 0u, "UI");
-
+		
 			m_cmdlist->SetPipelineState(m_pipelines[pipeline::ui].m_dxpipeline);
 			m_cmdlist->SetGraphicsRootSignature(m_pipelines[pipeline::ui].m_dxsignature);
 			const uint32 num_instances = (uint32)scene.m_ui_instances.size();
@@ -817,10 +873,42 @@ void renderman::render(renderscene& scene, const contentman& cman)
 			m_cmdlist->SetGraphicsRootShaderResourceView(1, m_instancebuffer_ui.m_resource->GetGPUVirtualAddress());
 			m_cmdlist->DrawInstanced(6, num_instances, 0, 0);
 		}
-
-		state_barrier(current_backbuffer, D3D12_RESOURCE_STATE_PRESENT);
 	}
-	
+
+	// [scenecolor post-processing]
+	// > outline
+	state_barrier(m_scenecolor.m_resource_color, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+	state_barrier(m_bitmap.m_resource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+	{
+		PIXScopedEvent(m_cmdlist, 0u, "[outline]");
+
+		m_cmdlist->SetPipelineState(m_pipelines[pipeline::outline].m_dxpipeline);
+		m_cmdlist->SetComputeRootSignature(m_pipelines[pipeline::outline].m_dxsignature);
+		m_cmdlist->SetComputeRootConstantBufferView(0u, m_cbuffers.resource(cbuffer::global).gpu_address());
+
+		static const uint32 group_size = 8; // todo: make this non-hardcoded? honestly not a big deal...
+		m_cmdlist->Dispatch(backbuffer_size.x / group_size, backbuffer_size.y / group_size, 1);
+	}
+
+	// [scenecolor > copy > backbuffer]
+	gpu_resource& current_backbuffer = swapchain.get_current_backbuffer_resource();
+	state_barrier(m_scenecolor.m_resource_color, D3D12_RESOURCE_STATE_COPY_SOURCE);
+	state_barrier(current_backbuffer, D3D12_RESOURCE_STATE_COPY_DEST);
+	{
+		const descriptor& current_backbuffer_rtv = swapchain.get_current_backbuffer_rtv();
+
+		D3D12_TEXTURE_COPY_LOCATION src = {};
+		src.pResource = m_scenecolor.m_resource_color.m_resource;
+		src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+		src.SubresourceIndex = 0;
+		D3D12_TEXTURE_COPY_LOCATION dst = {};
+		dst.pResource = current_backbuffer.m_resource;
+		dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+		dst.SubresourceIndex = 0;
+		m_cmdlist->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+	}
+	state_barrier(current_backbuffer, D3D12_RESOURCE_STATE_PRESENT);
+
 	// submit our frame commands to the GPU
 	m_cmdlist->Close();
 	vector<ID3D12CommandList*> cmdlists;
@@ -1075,6 +1163,7 @@ void renderman::process_scene_instances(renderscene& scene, const contentman& cm
 					(*instance).color = instance_data.m_color;
 					(*instance).bone_instance_offset.set_null();
 					(*instance).texid_basecolor.set_null();
+					(*instance).bitflags = (uint8)instance_data.m_bitflags;
 
 					const auto skel_instance = instance_data.m_skeleton_instance_idx;
 					if (instance_data.m_skeleton != k_id_invalid && skel_instance != (uint32)-1)
@@ -1188,13 +1277,16 @@ void renderman::process_scene_instances(renderscene& scene, const contentman& cm
 		});
 
 		// cbuffer: global
-		m_cbuffers.write_data(cbuffer::global, 0u, [this, &scene, total_num_bone_instances](void* dest) {
+		m_cbuffers.write_data(cbuffer::global, 0u, [this, backbuffer_size, &scene, total_num_bone_instances](void* dest) {
 			gpu_cbuffer_global* global = reinterpret_cast<gpu_cbuffer_global*>(dest);
 			global->light_color = scene.m_light.m_color;
 			global->light_direction = float4(-scene.m_light.m_transform.get_forward(), 1);
 			global->mat_to_lightspace = scene.m_light.m_mat_to_lightspace;
 			global->num_bone_instances = total_num_bone_instances;
+			global->outline_params = float4(1,1,1,1);
 			push_gpu_resource_descriptor(*m_device, m_shadows.m_srv, global->texid_shadows);
+			push_gpu_resource_descriptor(*m_device, m_bitmap.m_uav, global->texid_bitmap_uav);
+			push_gpu_resource_descriptor(*m_device, m_scenecolor.m_uav, global->texid_scenecolor_uav);
 		});
 
 		// cbuffer: main view
@@ -1206,6 +1298,7 @@ void renderman::process_scene_instances(renderscene& scene, const contentman& cm
 				scene.m_camera.m_clip_near,
 				scene.m_camera.m_clip_far);
 			dest_view->viewprojection = mat_proj * mat_view;
+			dest_view->screen_size = backbuffer_size;
 		});
 	}
 }
