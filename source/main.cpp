@@ -31,7 +31,6 @@ int main()
     // initialize the renderer
     renderman rman{};
     rman.initialize().claim();
-    rman.compile_shaders();
 
     gameman gman{};
     gman.start(cman);
@@ -71,7 +70,6 @@ int main()
             logman::log("[fps] {}", 1.0f / delta_seconds);
             logman::prev_color();
         }
-
         if (cm_log_clear.get_value() > 0)
         {
             system("cls");

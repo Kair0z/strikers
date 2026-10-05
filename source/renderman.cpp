@@ -30,26 +30,6 @@ static const char* k_vs_shaders[]{
 };
 
 namespace strikers {
-static uint64 calculate_format_bytesize(DXGI_FORMAT format)
-{
-	switch (format)
-	{
-	case DXGI_FORMAT_R32_FLOAT:
-	case DXGI_FORMAT_R32_UINT: 
-		return sizeof(float) * 1;
-	case DXGI_FORMAT_R32G32_FLOAT:
-	case DXGI_FORMAT_R32G32_UINT: 
-		return sizeof(float) * 2;
-	case DXGI_FORMAT_R32G32B32_FLOAT: 
-	case DXGI_FORMAT_R32G32B32_UINT: 
-		return sizeof(float) * 3;
-	case DXGI_FORMAT_R32G32B32A32_FLOAT:
-	case DXGI_FORMAT_R32G32B32A32_UINT:
-		return sizeof(float) * 4;
-	}
-	return 0;
-}
-
 static string hr_to_string(HRESULT hr)
 {
 	char* msg = nullptr;
@@ -75,7 +55,6 @@ static string hr_to_string(HRESULT hr)
 	if (msg) LocalFree(msg);
 	return result;
 }
-
 static DxcBuffer blob_encoding_to_dxc(IDxcBlobEncoding* encoding)
 {
 	DxcBuffer result;
@@ -89,7 +68,6 @@ static DxcBuffer blob_encoding_to_dxc(IDxcBlobEncoding* encoding)
 	result.Size = encoding->GetBufferSize();
 	return result;
 }
-
 static void release_if_valid(IUnknown* anything)
 {
 	if (anything != nullptr)
@@ -198,471 +176,176 @@ result<> shaderman::compile_shader(
 	return restype::make_success();
 }
 
-void renderman::compile_shaders()
+result<> renderman::initialize_pipelines()
 {
+	using restype = result<>;
 	static bool once = true;
-	if (!once) return;
+	if (!once) return {};
 	once = false;
 
-	using restype = result<>;
+	m_pipelines.resize(pipeline::num_total);
 
-	// vsps shaders
-	for (uint32 i = 0u; i < _countof(k_vsps_shaders); ++i)
+	// configure all pipelines
 	{
-		for (uint32 s = 0u; s < _countof(k_vsps_entrypoints); ++s)
+		m_pipelines[pipeline::skinning] = pipeline(pipeline::builder()
+			.filepath(k_skinning_shader_filepath)
+			.entrypoint(shader::cs, k_cs_entry)
+			.target(shader::cs, k_cs_target)
+		);
+
+		// mesh pipelines (using mesh vertex buffers)
 		{
-			m_shaderman.compile_shader(k_vsps_shaders[i], k_vsps_entrypoints[s], k_vsps_targets[s], *m_device).claim();
+			pipeline::builder common_builder{};
+			common_builder
+				// shaders
+				.filepath(k_shading_shader_filepath)
+				.entrypoint(shader::vs, k_vs_entry)
+				.entrypoint(shader::ps, k_ps_entry)
+				.target(shader::vs, k_vs_target)
+				.target(shader::ps, k_ps_target)
+				// vs_inputs
+				.push_mesh_vertex_inputs()
+				// depth & stencil
+				.enable_depth(true)
+				.depth_function(D3D12_COMPARISON_FUNC_LESS)
+				.depth_write_mask(D3D12_DEPTH_WRITE_MASK_ALL)
+				.dsv_format(DXGI_FORMAT_D32_FLOAT)
+				// rasterizer
+				.primitive_topology_type(D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE)
+				.cullmode(D3D12_CULL_MODE_NONE)
+				.fillmode(D3D12_FILL_MODE_SOLID)
+				// sampling
+				.sample_count(1)
+				.sample_mask(0xFFFFFFFF)
+				// render targets
+				.rt_format(0, DXGI_FORMAT_R8G8B8A8_UNORM)
+				.rt_write_mask(0, 0xf)
+				.rt_blend_source_to_dest(0, D3D12_BLEND_SRC_ALPHA, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA)
+				.rt_blend_alpha_source_to_dest(0, D3D12_BLEND_ONE, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA);
+			m_pipelines[pipeline::shading] = pipeline(common_builder);
+
+			// shaded - wireframe
+			common_builder
+				.fillmode(D3D12_FILL_MODE_WIREFRAME);
+			m_pipelines[pipeline::wireframe] = pipeline(common_builder);
+
+			// shadows
+			common_builder
+				.fillmode(D3D12_FILL_MODE_SOLID)
+				.filepath(k_shadows_shader_filepath)
+				.entrypoint(shader::ps, "")
+				.target(shader::ps, "");
+			m_pipelines[pipeline::shadows] = pipeline(common_builder);
 		}
-	}
-	for (uint32 i = 0u; i < _countof(k_vs_shaders); ++i)
-	{
-		m_shaderman.compile_shader(k_vs_shaders[i], k_vsps_entrypoints[0], k_vsps_targets[0], *m_device).claim();
-	}
-
-	// cs shaders
-	m_shaderman.compile_shader("D:/Git/strikers/hlsl/skinning.hlsl", "main_cs",
-		k_cs_target, *m_device).claim();
-	
-	compile_pipelines();
-}
-
-void renderman::populate_vertex_shader_input(pipeline_desc& pipeline)
-{
-	uint32 input_elements_byteoffset = 0u;
-	auto push_element = [&input_elements_byteoffset, &pipeline](DXGI_FORMAT format, const char* semantic_name, uint32 semantic_idx = 0)
-	{
-		pipeline.m_input_elements.push_back({});
-		pipeline.m_input_elements.back().AlignedByteOffset = input_elements_byteoffset;
-		pipeline.m_input_elements.back().Format = format;
-		pipeline.m_input_elements.back().InputSlot = 0u;
-		pipeline.m_input_elements.back().InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
-		pipeline.m_input_elements.back().InstanceDataStepRate = 0;
-		pipeline.m_input_elements.back().SemanticIndex = semantic_idx;
-		pipeline.m_input_elements.back().SemanticName = semantic_name;
-		input_elements_byteoffset += (uint32)calculate_format_bytesize(format);
-	};
-	push_element(DXGI_FORMAT_R32G32B32_FLOAT, "SV_POSITION");
-	push_element(DXGI_FORMAT_R32G32B32_FLOAT, "NORMAL");
-	push_element(DXGI_FORMAT_R32G32_FLOAT, "TEXCOORD", 0);
-	push_element(DXGI_FORMAT_R32G32B32A32_UINT, "BLENDINDICES", 0);
-	push_element(DXGI_FORMAT_R32G32B32A32_FLOAT, "BLENDWEIGHT", 0);
-}
-
-void renderman::compile_pipelines()
-{
-	m_pipelines.resize(pip_num + cpip_num);
-
-	// configure skinning pipeline
-	{
-		pipeline_desc& compute_pipeline = m_pipelines[cpip_skinning];
-		compute_pipeline.m_shaders_filepath = k_skinning_shader_filepath;
-		compute_pipeline.m_cs_entrypoint = k_cs_entry;
-		compute_pipeline.m_cs_target = k_cs_target;
-		compute_pipeline.m_compute_desc.CS;
-	}
-
-	// configure shading pipeline
-	{
-		pipeline_desc& shading_pipeline = m_pipelines[pip_shading];
-		shading_pipeline.m_shaders_filepath = k_shading_shader_filepath;
-		shading_pipeline.m_ps_entrypoint = k_ps_entry;
-		shading_pipeline.m_vs_entrypoint = k_vs_entry;
-		shading_pipeline.m_ps_target = k_ps_target;
-		shading_pipeline.m_vs_target = k_vs_target;
-		shading_pipeline.m_desc = {};
-
-		populate_vertex_shader_input(shading_pipeline);
-		shading_pipeline.m_desc.InputLayout.NumElements = (uint32)shading_pipeline.m_input_elements.size();
-		shading_pipeline.m_desc.InputLayout.pInputElementDescs = shading_pipeline.m_input_elements.data();
-		shading_pipeline.m_desc.BlendState.AlphaToCoverageEnable = false;
-		shading_pipeline.m_desc.BlendState.IndependentBlendEnable = false;
-		shading_pipeline.m_desc.DepthStencilState.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-		shading_pipeline.m_desc.DepthStencilState.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
-		shading_pipeline.m_desc.DepthStencilState.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-		shading_pipeline.m_desc.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
-		shading_pipeline.m_desc.DepthStencilState.BackFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-		shading_pipeline.m_desc.DepthStencilState.BackFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-		shading_pipeline.m_desc.DepthStencilState.BackFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
-		shading_pipeline.m_desc.DepthStencilState.DepthEnable = true;
-		shading_pipeline.m_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-		shading_pipeline.m_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-		shading_pipeline.m_desc.DepthStencilState.StencilEnable = false;
-		shading_pipeline.m_desc.DepthStencilState.StencilReadMask = 0;
-		shading_pipeline.m_desc.DepthStencilState.StencilWriteMask = 0;
-		shading_pipeline.m_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-		shading_pipeline.m_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-		shading_pipeline.m_desc.RasterizerState.AntialiasedLineEnable = false;
-		shading_pipeline.m_desc.RasterizerState.ConservativeRaster;
-		shading_pipeline.m_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-		shading_pipeline.m_desc.RasterizerState.DepthBias = 0;
-		shading_pipeline.m_desc.RasterizerState.DepthBiasClamp = 0;
-		shading_pipeline.m_desc.RasterizerState.DepthClipEnable = false;
-		shading_pipeline.m_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-		shading_pipeline.m_desc.RasterizerState.ForcedSampleCount;
-		shading_pipeline.m_desc.RasterizerState.FrontCounterClockwise = false;
-		shading_pipeline.m_desc.RasterizerState.MultisampleEnable;
-		shading_pipeline.m_desc.RasterizerState.SlopeScaledDepthBias;
-		shading_pipeline.m_desc.SampleDesc.Count = 1;
-		shading_pipeline.m_desc.SampleDesc.Quality = 0;
-		shading_pipeline.m_desc.SampleMask = 0xFFFFFFFF;
-		shading_pipeline.m_desc.NumRenderTargets = 1;		
-		for (uint32 i = 0u; i < shading_pipeline.m_desc.NumRenderTargets; ++i)
+		
+		// special geometry pipelines
 		{
-			shading_pipeline.m_desc.RTVFormats[i] = DXGI_FORMAT_R8G8B8A8_UNORM;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].BlendEnable = TRUE;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].LogicOpEnable = FALSE;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].SrcBlend = D3D12_BLEND_SRC_ALPHA;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].BlendOp = D3D12_BLEND_OP_ADD;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].SrcBlendAlpha = D3D12_BLEND_ONE;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].LogicOp = D3D12_LOGIC_OP_NOOP;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].RenderTargetWriteMask = 0xf;
-		}
-	}
-	// configure wireframe pipeline
-	{
-		pipeline_desc& shading_pipeline = m_pipelines[pip_wireframe];
-		shading_pipeline.m_shaders_filepath = k_shading_shader_filepath;
-		shading_pipeline.m_ps_entrypoint = k_ps_entry;
-		shading_pipeline.m_vs_entrypoint = k_vs_entry;
-		shading_pipeline.m_ps_target = k_ps_target;
-		shading_pipeline.m_vs_target = k_vs_target;
-		shading_pipeline.m_desc = {};
+			pipeline::builder common_builder{}; common_builder
+				.filepath(k_shading_shader_filepath)
+				.entrypoint(shader::vs, k_vs_entry)
+				.entrypoint(shader::ps, k_ps_entry)
+				.target(shader::vs, k_vs_target)
+				.target(shader::ps, k_ps_target)
+				// depth & stencil
+				.enable_depth(true)
+				.depth_function(D3D12_COMPARISON_FUNC_LESS)
+				.depth_write_mask(D3D12_DEPTH_WRITE_MASK_ALL)
+				.dsv_format(DXGI_FORMAT_D32_FLOAT)
+				// rasterizer
+				.cullmode(D3D12_CULL_MODE_NONE)
+				.fillmode(D3D12_FILL_MODE_SOLID)
+				// sampling
+				.sample_count(1)
+				.sample_mask(0xFFFFFFFF)
+				// render targets
+				.rt_format(0, DXGI_FORMAT_R8G8B8A8_UNORM)
+				.rt_write_mask(0, 0xf)
+				.rt_blend_source_to_dest(0, D3D12_BLEND_SRC_ALPHA, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA)
+				.rt_blend_alpha_source_to_dest(0, D3D12_BLEND_ONE, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA);
+		
+			common_builder
+				.filepath(k_lines_shader_filepath)
+				.primitive_topology_type(D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE);
+			m_pipelines[pipeline::lines] = pipeline(common_builder);
 
-		populate_vertex_shader_input(shading_pipeline);
-		shading_pipeline.m_desc.InputLayout.NumElements = (uint32)shading_pipeline.m_input_elements.size();
-		shading_pipeline.m_desc.InputLayout.pInputElementDescs = shading_pipeline.m_input_elements.data();
-		shading_pipeline.m_desc.BlendState.AlphaToCoverageEnable = false;
-		shading_pipeline.m_desc.BlendState.IndependentBlendEnable = false;
-		shading_pipeline.m_desc.DepthStencilState.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-		shading_pipeline.m_desc.DepthStencilState.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
-		shading_pipeline.m_desc.DepthStencilState.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-		shading_pipeline.m_desc.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
-		shading_pipeline.m_desc.DepthStencilState.BackFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-		shading_pipeline.m_desc.DepthStencilState.BackFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-		shading_pipeline.m_desc.DepthStencilState.BackFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
-		shading_pipeline.m_desc.DepthStencilState.DepthEnable = true;
-		shading_pipeline.m_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-		shading_pipeline.m_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-		shading_pipeline.m_desc.DepthStencilState.StencilEnable = false;
-		shading_pipeline.m_desc.DepthStencilState.StencilReadMask = 0;
-		shading_pipeline.m_desc.DepthStencilState.StencilWriteMask = 0;
-		shading_pipeline.m_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-		shading_pipeline.m_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-		shading_pipeline.m_desc.RasterizerState.AntialiasedLineEnable = false;
-		shading_pipeline.m_desc.RasterizerState.ConservativeRaster;
-		shading_pipeline.m_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-		shading_pipeline.m_desc.RasterizerState.DepthBias = 0;
-		shading_pipeline.m_desc.RasterizerState.DepthBiasClamp = 0;
-		shading_pipeline.m_desc.RasterizerState.DepthClipEnable = false;
-		shading_pipeline.m_desc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
-		shading_pipeline.m_desc.RasterizerState.ForcedSampleCount;
-		shading_pipeline.m_desc.RasterizerState.FrontCounterClockwise = false;
-		shading_pipeline.m_desc.RasterizerState.MultisampleEnable;
-		shading_pipeline.m_desc.RasterizerState.SlopeScaledDepthBias;
-		shading_pipeline.m_desc.SampleDesc.Count = 1;
-		shading_pipeline.m_desc.SampleDesc.Quality = 0;
-		shading_pipeline.m_desc.SampleMask = 0xFFFFFFFF;
-		shading_pipeline.m_desc.NumRenderTargets = 1;
-		for (uint32 i = 0u; i < shading_pipeline.m_desc.NumRenderTargets; ++i)
-		{
-			shading_pipeline.m_desc.RTVFormats[i] = DXGI_FORMAT_R8G8B8A8_UNORM;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].BlendEnable = TRUE;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].LogicOpEnable = FALSE;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].SrcBlend = D3D12_BLEND_SRC_ALPHA;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].BlendOp = D3D12_BLEND_OP_ADD;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].SrcBlendAlpha = D3D12_BLEND_ONE;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].LogicOp = D3D12_LOGIC_OP_NOOP;
-			shading_pipeline.m_desc.BlendState.RenderTarget[i].RenderTargetWriteMask = 0xf;
-		}
-	}
-	// configure ui pipeline
-	{
-		pipeline_desc& ui_pipeline = m_pipelines[pip_ui];
-		ui_pipeline.m_shaders_filepath = k_ui_shader_filepath;
-		ui_pipeline.m_ps_entrypoint = k_ps_entry;
-		ui_pipeline.m_vs_entrypoint = k_vs_entry;
-		ui_pipeline.m_ps_target = k_ps_target;
-		ui_pipeline.m_vs_target = k_vs_target;
-		ui_pipeline.m_desc = {};
+			common_builder
+				.filepath(k_quads_shader_filepath)
+				.primitive_topology_type(D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE);
+			m_pipelines[pipeline::quads] = pipeline(common_builder);
 
-		ui_pipeline.m_desc.InputLayout.NumElements = (uint32)ui_pipeline.m_input_elements.size();
-		ui_pipeline.m_desc.InputLayout.pInputElementDescs = ui_pipeline.m_input_elements.data();
-		ui_pipeline.m_desc.BlendState.AlphaToCoverageEnable = false;
-		ui_pipeline.m_desc.BlendState.IndependentBlendEnable = false;
-		ui_pipeline.m_desc.DepthStencilState.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-		ui_pipeline.m_desc.DepthStencilState.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
-		ui_pipeline.m_desc.DepthStencilState.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-		ui_pipeline.m_desc.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
-		ui_pipeline.m_desc.DepthStencilState.BackFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-		ui_pipeline.m_desc.DepthStencilState.BackFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-		ui_pipeline.m_desc.DepthStencilState.BackFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
-		ui_pipeline.m_desc.DepthStencilState.DepthEnable = true;
-		ui_pipeline.m_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-		ui_pipeline.m_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-		ui_pipeline.m_desc.DepthStencilState.StencilEnable = false;
-		ui_pipeline.m_desc.DepthStencilState.StencilReadMask = 0;
-		ui_pipeline.m_desc.DepthStencilState.StencilWriteMask = 0;
-		ui_pipeline.m_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-		ui_pipeline.m_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-		ui_pipeline.m_desc.RasterizerState.AntialiasedLineEnable = false;
-		ui_pipeline.m_desc.RasterizerState.ConservativeRaster;
-		ui_pipeline.m_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-		ui_pipeline.m_desc.RasterizerState.DepthBias = 0;
-		ui_pipeline.m_desc.RasterizerState.DepthBiasClamp = 0;
-		ui_pipeline.m_desc.RasterizerState.DepthClipEnable = false;
-		ui_pipeline.m_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-		ui_pipeline.m_desc.RasterizerState.ForcedSampleCount;
-		ui_pipeline.m_desc.RasterizerState.FrontCounterClockwise = false;
-		ui_pipeline.m_desc.RasterizerState.MultisampleEnable;
-		ui_pipeline.m_desc.RasterizerState.SlopeScaledDepthBias;
-		ui_pipeline.m_desc.SampleDesc.Count = 1;
-		ui_pipeline.m_desc.SampleDesc.Quality = 0;
-		ui_pipeline.m_desc.SampleMask = 0xFFFFFFFF;
-		ui_pipeline.m_desc.NumRenderTargets = 1;
-		for (uint32 i = 0u; i < ui_pipeline.m_desc.NumRenderTargets; ++i)
-		{
-			ui_pipeline.m_desc.RTVFormats[i] = DXGI_FORMAT_R8G8B8A8_UNORM;
-			ui_pipeline.m_desc.BlendState.RenderTarget[i].BlendEnable = TRUE;
-			ui_pipeline.m_desc.BlendState.RenderTarget[i].LogicOpEnable = FALSE;
-			ui_pipeline.m_desc.BlendState.RenderTarget[i].SrcBlend = D3D12_BLEND_SRC_ALPHA;
-			ui_pipeline.m_desc.BlendState.RenderTarget[i].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-			ui_pipeline.m_desc.BlendState.RenderTarget[i].BlendOp = D3D12_BLEND_OP_ADD;
-			ui_pipeline.m_desc.BlendState.RenderTarget[i].SrcBlendAlpha = D3D12_BLEND_ONE;
-			ui_pipeline.m_desc.BlendState.RenderTarget[i].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
-			ui_pipeline.m_desc.BlendState.RenderTarget[i].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-			ui_pipeline.m_desc.BlendState.RenderTarget[i].LogicOp = D3D12_LOGIC_OP_NOOP;
-			ui_pipeline.m_desc.BlendState.RenderTarget[i].RenderTargetWriteMask = 0xf;
-		}
-	}
-	// configure lines pipeline
-	{
-		pipeline_desc& pipeline = m_pipelines[pip_lines];
-		pipeline.m_shaders_filepath = k_lines_shader_filepath;
-		pipeline.m_ps_entrypoint = k_ps_entry;
-		pipeline.m_vs_entrypoint = k_vs_entry;
-		pipeline.m_ps_target = k_ps_target;
-		pipeline.m_vs_target = k_vs_target;
-		pipeline.m_desc = {};
-
-		pipeline.m_desc.InputLayout.NumElements = (uint32)pipeline.m_input_elements.size();
-		pipeline.m_desc.InputLayout.pInputElementDescs = pipeline.m_input_elements.data();
-		pipeline.m_desc.BlendState.AlphaToCoverageEnable = false;
-		pipeline.m_desc.BlendState.IndependentBlendEnable = false;
-		pipeline.m_desc.DepthStencilState.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-		pipeline.m_desc.DepthStencilState.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
-		pipeline.m_desc.DepthStencilState.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-		pipeline.m_desc.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
-		pipeline.m_desc.DepthStencilState.BackFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-		pipeline.m_desc.DepthStencilState.BackFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-		pipeline.m_desc.DepthStencilState.BackFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
-		pipeline.m_desc.DepthStencilState.DepthEnable = true;
-		pipeline.m_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-		pipeline.m_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-		pipeline.m_desc.DepthStencilState.StencilEnable = false;
-		pipeline.m_desc.DepthStencilState.StencilReadMask = 0;
-		pipeline.m_desc.DepthStencilState.StencilWriteMask = 0;
-		pipeline.m_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-		pipeline.m_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
-		pipeline.m_desc.RasterizerState.AntialiasedLineEnable = false;
-		pipeline.m_desc.RasterizerState.ConservativeRaster;
-		pipeline.m_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-		pipeline.m_desc.RasterizerState.DepthBias = 0;
-		pipeline.m_desc.RasterizerState.DepthBiasClamp = 0;
-		pipeline.m_desc.RasterizerState.DepthClipEnable = false;
-		pipeline.m_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-		pipeline.m_desc.RasterizerState.ForcedSampleCount;
-		pipeline.m_desc.RasterizerState.FrontCounterClockwise = false;
-		pipeline.m_desc.RasterizerState.MultisampleEnable;
-		pipeline.m_desc.RasterizerState.SlopeScaledDepthBias;
-		pipeline.m_desc.SampleDesc.Count = 1;
-		pipeline.m_desc.SampleDesc.Quality = 0;
-		pipeline.m_desc.SampleMask = 0xFFFFFFFF;
-		pipeline.m_desc.NumRenderTargets = 1;
-		for (uint32 i = 0u; i < pipeline.m_desc.NumRenderTargets; ++i)
-		{
-			pipeline.m_desc.RTVFormats[i] = DXGI_FORMAT_R8G8B8A8_UNORM;
-			pipeline.m_desc.BlendState.RenderTarget[i].BlendEnable = TRUE;
-			pipeline.m_desc.BlendState.RenderTarget[i].LogicOpEnable = FALSE;
-			pipeline.m_desc.BlendState.RenderTarget[i].SrcBlend = D3D12_BLEND_SRC_ALPHA;
-			pipeline.m_desc.BlendState.RenderTarget[i].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-			pipeline.m_desc.BlendState.RenderTarget[i].BlendOp = D3D12_BLEND_OP_ADD;
-			pipeline.m_desc.BlendState.RenderTarget[i].SrcBlendAlpha = D3D12_BLEND_ONE;
-			pipeline.m_desc.BlendState.RenderTarget[i].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
-			pipeline.m_desc.BlendState.RenderTarget[i].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-			pipeline.m_desc.BlendState.RenderTarget[i].LogicOp = D3D12_LOGIC_OP_NOOP;
-			pipeline.m_desc.BlendState.RenderTarget[i].RenderTargetWriteMask = 0xf;
-		}
-	}
-	// configure quads pipeline
-	{
-		pipeline_desc& pipeline = m_pipelines[pip_quads];
-		pipeline.m_shaders_filepath = k_quads_shader_filepath;
-		pipeline.m_ps_entrypoint = k_ps_entry;
-		pipeline.m_vs_entrypoint = k_vs_entry;
-		pipeline.m_ps_target = k_ps_target;
-		pipeline.m_vs_target = k_vs_target;
-		pipeline.m_desc = {};
-
-		pipeline.m_desc.InputLayout.NumElements = (uint32)pipeline.m_input_elements.size();
-		pipeline.m_desc.InputLayout.pInputElementDescs = pipeline.m_input_elements.data();
-		pipeline.m_desc.BlendState.AlphaToCoverageEnable = false;
-		pipeline.m_desc.BlendState.IndependentBlendEnable = false;
-		pipeline.m_desc.DepthStencilState.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-		pipeline.m_desc.DepthStencilState.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
-		pipeline.m_desc.DepthStencilState.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-		pipeline.m_desc.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
-		pipeline.m_desc.DepthStencilState.BackFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-		pipeline.m_desc.DepthStencilState.BackFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-		pipeline.m_desc.DepthStencilState.BackFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
-		pipeline.m_desc.DepthStencilState.DepthEnable = true;
-		pipeline.m_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-		pipeline.m_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-		pipeline.m_desc.DepthStencilState.StencilEnable = false;
-		pipeline.m_desc.DepthStencilState.StencilReadMask = 0;
-		pipeline.m_desc.DepthStencilState.StencilWriteMask = 0;
-		pipeline.m_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-		pipeline.m_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-		pipeline.m_desc.RasterizerState.AntialiasedLineEnable = false;
-		pipeline.m_desc.RasterizerState.ConservativeRaster;
-		pipeline.m_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-		pipeline.m_desc.RasterizerState.DepthBias = 0;
-		pipeline.m_desc.RasterizerState.DepthBiasClamp = 0;
-		pipeline.m_desc.RasterizerState.DepthClipEnable = false;
-		pipeline.m_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-		pipeline.m_desc.RasterizerState.ForcedSampleCount;
-		pipeline.m_desc.RasterizerState.FrontCounterClockwise = false;
-		pipeline.m_desc.RasterizerState.MultisampleEnable;
-		pipeline.m_desc.RasterizerState.SlopeScaledDepthBias;
-		pipeline.m_desc.SampleDesc.Count = 1;
-		pipeline.m_desc.SampleDesc.Quality = 0;
-		pipeline.m_desc.SampleMask = 0xFFFFFFFF;
-		pipeline.m_desc.NumRenderTargets = 1;
-		for (uint32 i = 0u; i < pipeline.m_desc.NumRenderTargets; ++i)
-		{
-			pipeline.m_desc.RTVFormats[i] = DXGI_FORMAT_R8G8B8A8_UNORM;
-			pipeline.m_desc.BlendState.RenderTarget[i].BlendEnable = TRUE;
-			pipeline.m_desc.BlendState.RenderTarget[i].LogicOpEnable = FALSE;
-			pipeline.m_desc.BlendState.RenderTarget[i].SrcBlend = D3D12_BLEND_SRC_ALPHA;
-			pipeline.m_desc.BlendState.RenderTarget[i].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-			pipeline.m_desc.BlendState.RenderTarget[i].BlendOp = D3D12_BLEND_OP_ADD;
-			pipeline.m_desc.BlendState.RenderTarget[i].SrcBlendAlpha = D3D12_BLEND_ONE;
-			pipeline.m_desc.BlendState.RenderTarget[i].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
-			pipeline.m_desc.BlendState.RenderTarget[i].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-			pipeline.m_desc.BlendState.RenderTarget[i].LogicOp = D3D12_LOGIC_OP_NOOP;
-			pipeline.m_desc.BlendState.RenderTarget[i].RenderTargetWriteMask = 0xf;
-		}
-	}
-	// configure shadows pipeline
-	{
-		pipeline_desc& pipeline = m_pipelines[pip_shadows];
-		pipeline.m_shaders_filepath = k_shadows_shader_filepath;
-		pipeline.m_vs_entrypoint = k_vs_entry;
-		pipeline.m_vs_target = k_vs_target;
-		pipeline.m_ps_entrypoint = ""; // no pixel shader
-		pipeline.m_ps_target = ""; // no pixel shader
-		pipeline.m_desc = {};
-
-		populate_vertex_shader_input(pipeline);
-
-		pipeline.m_desc.InputLayout.NumElements = (uint32)pipeline.m_input_elements.size();
-		pipeline.m_desc.InputLayout.pInputElementDescs = pipeline.m_input_elements.data();
-		pipeline.m_desc.BlendState.AlphaToCoverageEnable = false;
-		pipeline.m_desc.BlendState.IndependentBlendEnable = false;
-		pipeline.m_desc.DepthStencilState.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-		pipeline.m_desc.DepthStencilState.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
-		pipeline.m_desc.DepthStencilState.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-		pipeline.m_desc.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
-		pipeline.m_desc.DepthStencilState.BackFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-		pipeline.m_desc.DepthStencilState.BackFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-		pipeline.m_desc.DepthStencilState.BackFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
-		pipeline.m_desc.DepthStencilState.DepthEnable = true;
-		pipeline.m_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-		pipeline.m_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-		pipeline.m_desc.DepthStencilState.StencilEnable = false;
-		pipeline.m_desc.DepthStencilState.StencilReadMask = 0;
-		pipeline.m_desc.DepthStencilState.StencilWriteMask = 0;
-		pipeline.m_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-		pipeline.m_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-		pipeline.m_desc.RasterizerState.AntialiasedLineEnable = false;
-		pipeline.m_desc.RasterizerState.ConservativeRaster;
-		pipeline.m_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-		pipeline.m_desc.RasterizerState.DepthBias = 0;
-		pipeline.m_desc.RasterizerState.DepthBiasClamp = 0;
-		pipeline.m_desc.RasterizerState.DepthClipEnable = false;
-		pipeline.m_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-		pipeline.m_desc.RasterizerState.ForcedSampleCount;
-		pipeline.m_desc.RasterizerState.FrontCounterClockwise = false;
-		pipeline.m_desc.RasterizerState.MultisampleEnable;
-		pipeline.m_desc.RasterizerState.SlopeScaledDepthBias;
-		pipeline.m_desc.SampleDesc.Count = 1;
-		pipeline.m_desc.SampleDesc.Quality = 0;
-		pipeline.m_desc.SampleMask = 0xFFFFFFFF;
-		pipeline.m_desc.NumRenderTargets = 1;
-		for (uint32 i = 0u; i < pipeline.m_desc.NumRenderTargets; ++i)
-		{
-			pipeline.m_desc.RTVFormats[i] = DXGI_FORMAT_R8G8B8A8_UNORM;
-			pipeline.m_desc.BlendState.RenderTarget[i].BlendEnable = TRUE;
-			pipeline.m_desc.BlendState.RenderTarget[i].LogicOpEnable = FALSE;
-			pipeline.m_desc.BlendState.RenderTarget[i].SrcBlend = D3D12_BLEND_SRC_ALPHA;
-			pipeline.m_desc.BlendState.RenderTarget[i].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-			pipeline.m_desc.BlendState.RenderTarget[i].BlendOp = D3D12_BLEND_OP_ADD;
-			pipeline.m_desc.BlendState.RenderTarget[i].SrcBlendAlpha = D3D12_BLEND_ONE;
-			pipeline.m_desc.BlendState.RenderTarget[i].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
-			pipeline.m_desc.BlendState.RenderTarget[i].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-			pipeline.m_desc.BlendState.RenderTarget[i].LogicOp = D3D12_LOGIC_OP_NOOP;
-			pipeline.m_desc.BlendState.RenderTarget[i].RenderTargetWriteMask = 0xf;
+			common_builder
+				.filepath(k_ui_shader_filepath)
+				.primitive_topology_type(D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE);
+			m_pipelines[pipeline::ui] = pipeline(common_builder);
 		}
 	}
 
-	// here we create the actual dx12 stuff
-	for (uint32 i = 0u; i < m_pipelines.size(); ++i)
+	// compile all pipelines' shaders
+	for (uint32 p = 0u; p < m_pipelines.size(); ++p)
 	{
-		pipeline_desc& pip = m_pipelines[i];
-		if (is_pipeline_compute((pipeline)i))
+		const pipeline& pip = m_pipelines[p];
+		for (uint32 s = 0; s < shader::num; ++s)
 		{
-			const auto& cs_shader = m_shaderman.get_shader(
-				pip.m_shaders_filepath, pip.m_cs_entrypoint, pip.m_cs_target).claim();
-			
-			D3D12_COMPUTE_PIPELINE_STATE_DESC& pipeline_desc = pip.m_compute_desc;
-			pipeline_desc.CS = cs_shader->m_shader_bytecode;
-			pipeline_desc.pRootSignature = cs_shader->m_signature;
-			pip.m_dxsignature = cs_shader->m_signature;
-			HRESULT hres = m_device->CreateComputePipelineState(&pipeline_desc, IID_PPV_ARGS(&pip.m_dxpipeline));
-			if (!SUCCEEDED(hres))
+			const string& shader_entrypoint = pip.m_builder.m_entrypoints[s];
+			const string& shader_target = pip.m_builder.m_targets[s];
+			if (!shader_entrypoint.empty() && !shader_target.empty())
+				m_shaderman.compile_shader(pip.m_builder.m_filepath, shader_entrypoint, shader_target, *m_device).claim();
+		}
+	}
+
+	// compile all pipelines
+	{
+		for (uint32 p = 0u; p < m_pipelines.size(); ++p)
+		{
+			pipeline& pip = m_pipelines[p];
+			if (pipeline::is_compute(p))
 			{
-				int a = 0; // todo: do something...
+				const auto& cs_shader = m_shaderman.get_shader(
+					pip.m_builder.m_filepath, pip.m_builder.m_entrypoints[shader::cs], pip.m_builder.m_targets[shader::cs]).claim();
+
+				D3D12_COMPUTE_PIPELINE_STATE_DESC& pipeline_desc = pip.m_builder.m_compute_desc;
+				pipeline_desc.CS = cs_shader->m_shader_bytecode;
+				pipeline_desc.pRootSignature = cs_shader->m_signature;
+				pip.m_dxsignature = cs_shader->m_signature;
+				HRESULT hres = m_device->CreateComputePipelineState(&pipeline_desc, IID_PPV_ARGS(&pip.m_dxpipeline));
+				if (!SUCCEEDED(hres))
+				{
+					int a = 0; // todo: do something...
+				}
 			}
-		}
-		else if (is_pipeline_graphics((pipeline)i))
-		{
-			const auto& vs_shader = m_shaderman.get_shader(
-				pip.m_shaders_filepath, pip.m_vs_entrypoint, pip.m_vs_target).claim();
-
-			shaderman::shader_entry const* pixelshader = nullptr;
-			if (!pip.m_ps_entrypoint.empty() && !pip.m_ps_target.empty())
+			else if (pipeline::is_graphics(p))
 			{
-				pixelshader = m_shaderman.get_shader(
-					pip.m_shaders_filepath, pip.m_ps_entrypoint, pip.m_ps_target).claim();
-			}
+				pip.m_builder.m_graphics_desc.InputLayout.NumElements = (uint32)pip.m_builder.m_input_elements.size();
+				pip.m_builder.m_graphics_desc.InputLayout.pInputElementDescs = pip.m_builder.m_input_elements.data();
 
-			D3D12_GRAPHICS_PIPELINE_STATE_DESC& pipeline_desc = pip.m_desc;
-			if (pixelshader) pipeline_desc.PS = pixelshader->m_shader_bytecode;
-			pipeline_desc.VS = vs_shader->m_shader_bytecode;
-			pipeline_desc.pRootSignature = vs_shader->m_signature;
-			pip.m_dxsignature = vs_shader->m_signature;
-			HRESULT hres = m_device->CreateGraphicsPipelineState(&pipeline_desc, IID_PPV_ARGS(&pip.m_dxpipeline));
-			if (!SUCCEEDED(hres))
-			{
-				int a = 0; // todo: do something...
+				const string& filepath = pip.m_builder.m_filepath;
+				const string& vs_entrypoint = pip.m_builder.m_entrypoints[shader::vs];
+				const string& ps_entrypoint = pip.m_builder.m_entrypoints[shader::ps];
+				const string& vs_target = pip.m_builder.m_targets[shader::vs];
+				const string& ps_target = pip.m_builder.m_targets[shader::ps];
+				const auto& vs_shader = m_shaderman.get_shader(filepath, vs_entrypoint, vs_target).claim();
+
+				D3D12_GRAPHICS_PIPELINE_STATE_DESC& pipeline_desc = pip.m_builder.m_graphics_desc;
+				pipeline_desc.VS = vs_shader->m_shader_bytecode;
+				pipeline_desc.pRootSignature = vs_shader->m_signature;
+				pip.m_dxsignature = vs_shader->m_signature;
+
+				if (!ps_entrypoint.empty() && !ps_target.empty())
+				{
+					auto& ps_shader = m_shaderman.get_shader(filepath, ps_entrypoint, ps_target).claim();
+					if (ps_shader) pipeline_desc.PS = ps_shader->m_shader_bytecode;
+				}
+
+				HRESULT hres = m_device->CreateGraphicsPipelineState(&pipeline_desc, IID_PPV_ARGS(&pip.m_dxpipeline));
+				if (!SUCCEEDED(hres))
+				{
+					int a = 0; // todo: do something...
+				}
 			}
 		}
 	}
+
+	return {};
 }
 
 result<> renderman::initialize()
@@ -847,6 +530,8 @@ result<> renderman::initialize()
 		).claim();
 	}
 
+	initialize_pipelines().claim();
+
 	return result;
 }
 
@@ -960,8 +645,8 @@ void renderman::render(renderscene& scene, const contentman& cman)
 	{
 		PIXScopedEvent(m_cmdlist, 0u, "[cpip_skinning]");
 
-		m_cmdlist->SetPipelineState(m_pipelines[cpip_skinning].m_dxpipeline);
-		m_cmdlist->SetComputeRootSignature(m_pipelines[cpip_skinning].m_dxsignature);
+		m_cmdlist->SetPipelineState(m_pipelines[pipeline::skinning].m_dxpipeline);
+		m_cmdlist->SetComputeRootSignature(m_pipelines[pipeline::skinning].m_dxsignature);
 		m_cmdlist->SetComputeRootConstantBufferView(0u, m_cbuffers.resource(cbuffer::global).gpu_address());
 		m_cmdlist->SetComputeRootShaderResourceView(1u, bone_buffer.gpu_address());
 		m_cmdlist->SetComputeRootShaderResourceView(2u, anim_channels_buffer.gpu_address());
@@ -1013,8 +698,8 @@ void renderman::render(renderscene& scene, const contentman& cman)
 		m_cmdlist->RSSetScissorRects(1, &scissor);
 
 		PIXScopedEvent(m_cmdlist, 0u, "[pip_shadows]");
-		m_cmdlist->SetPipelineState(m_pipelines[pip_shadows].m_dxpipeline);
-		m_cmdlist->SetGraphicsRootSignature(m_pipelines[pip_shadows].m_dxsignature);
+		m_cmdlist->SetPipelineState(m_pipelines[pipeline::shadows].m_dxpipeline);
+		m_cmdlist->SetGraphicsRootSignature(m_pipelines[pipeline::shadows].m_dxsignature);
 		m_cmdlist->SetGraphicsRootConstantBufferView(0, m_cbuffers.resource(cbuffer::view, view::light).gpu_address());
 		m_cmdlist->SetGraphicsRootShaderResourceView(1, m_instancebuffer.gpu_address());
 		m_cmdlist->SetGraphicsRootShaderResourceView(2, bone_instance_buffer.gpu_address());
@@ -1058,11 +743,11 @@ void renderman::render(renderscene& scene, const contentman& cman)
 		// > pip_wireframe
 		if (scene.any_meshes())
 		{
-			static const uint32 k_num_shaders = (uint32)shader::num;
-			static const pipeline k_pipelines[k_num_shaders]
+			static const uint32 k_num_shaders = modelshader::num;
+			static const pipeline::slot k_pipelines[k_num_shaders]
 			{
-				pip_shading,
-				pip_wireframe
+				pipeline::shading,
+				pipeline::wireframe
 			};
 			static const char* k_shader_names[]
 			{
@@ -1093,8 +778,8 @@ void renderman::render(renderscene& scene, const contentman& cman)
 		if (!scene.m_line_instances.empty())
 		{
 			PIXScopedEvent(m_cmdlist, 0u, "lines");
-			m_cmdlist->SetPipelineState(m_pipelines[pip_lines].m_dxpipeline);
-			m_cmdlist->SetGraphicsRootSignature(m_pipelines[pip_lines].m_dxsignature);
+			m_cmdlist->SetPipelineState(m_pipelines[pipeline::lines].m_dxpipeline);
+			m_cmdlist->SetGraphicsRootSignature(m_pipelines[pipeline::lines].m_dxsignature);
 
 			// update lines instance buffer
 			const uint32 num_instances = (uint32)scene.m_line_instances.size();
@@ -1109,8 +794,8 @@ void renderman::render(renderscene& scene, const contentman& cman)
 		if (!scene.m_quad_instances.empty())
 		{
 			PIXScopedEvent(m_cmdlist, 0u, "quads");
-			m_cmdlist->SetPipelineState(m_pipelines[pip_quads].m_dxpipeline);
-			m_cmdlist->SetGraphicsRootSignature(m_pipelines[pip_quads].m_dxsignature);
+			m_cmdlist->SetPipelineState(m_pipelines[pipeline::quads].m_dxpipeline);
+			m_cmdlist->SetGraphicsRootSignature(m_pipelines[pipeline::quads].m_dxsignature);
 
 			const uint32 num_instances = (uint32)scene.m_quad_instances.size();
 			m_cmdlist->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1125,8 +810,8 @@ void renderman::render(renderscene& scene, const contentman& cman)
 		{
 			PIXScopedEvent(m_cmdlist, 0u, "UI");
 
-			m_cmdlist->SetPipelineState(m_pipelines[pip_ui].m_dxpipeline);
-			m_cmdlist->SetGraphicsRootSignature(m_pipelines[pip_ui].m_dxsignature);
+			m_cmdlist->SetPipelineState(m_pipelines[pipeline::ui].m_dxpipeline);
+			m_cmdlist->SetGraphicsRootSignature(m_pipelines[pipeline::ui].m_dxsignature);
 			const uint32 num_instances = (uint32)scene.m_ui_instances.size();
 			m_cmdlist->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 			m_cmdlist->SetGraphicsRootShaderResourceView(1, m_instancebuffer_ui.m_resource->GetGPUVirtualAddress());

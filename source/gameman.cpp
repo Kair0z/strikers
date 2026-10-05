@@ -1013,7 +1013,7 @@ void gameman::build_renderscene(contentman& cman, renderscene& scene)
 			continue;
 		}
 		
-		auto& mesh_instance = scene.add_mesh_instance(meshid, shader::slot::shaded);
+		auto& mesh_instance = scene.add_mesh_instance(meshid, modelshader::slot::shaded);
 		mesh_instance.m_transform = transform;
 		mesh_instance.apply_material(cman, cman.get_mesh_material_id(meshid));
 

@@ -40,6 +40,26 @@ using dxsignature = ID3D12RootSignature;
 using dxresource_state = D3D12_RESOURCE_STATES;
 using dxpipeline = ID3D12PipelineState;
 
+static uint64 calculate_format_bytesize(DXGI_FORMAT format)
+{
+	switch (format)
+	{
+	case DXGI_FORMAT_R32_FLOAT:
+	case DXGI_FORMAT_R32_UINT:
+		return sizeof(float) * 1;
+	case DXGI_FORMAT_R32G32_FLOAT:
+	case DXGI_FORMAT_R32G32_UINT:
+		return sizeof(float) * 2;
+	case DXGI_FORMAT_R32G32B32_FLOAT:
+	case DXGI_FORMAT_R32G32B32_UINT:
+		return sizeof(float) * 3;
+	case DXGI_FORMAT_R32G32B32A32_FLOAT:
+	case DXGI_FORMAT_R32G32B32A32_UINT:
+		return sizeof(float) * 4;
+	}
+	return 0;
+}
+
 struct cbuffer final
 {
 	enum slot
@@ -68,7 +88,8 @@ struct view final
 		num
 	};
 };
-struct shader
+
+struct modelshader
 {
 	enum slot
 	{
@@ -94,7 +115,7 @@ public:
 	struct batch_key
 	{
 		mesh_id m_mesh;
-		shader::slot m_shader;
+		modelshader::slot m_shader;
 
 		struct hash_t {
 			uint64 operator()(const batch_key& k) const {
@@ -118,7 +139,7 @@ public:
 		uint32			m_skeleton_instance_idx	= (uint32)-1;
 		mesh_id			m_mesh					= k_id_invalid;
 		skel_id			m_skeleton				= k_id_invalid;
-		shader::slot	m_shader				= shader::shaded;
+		uint32 			m_shader				= modelshader::shaded;
 		image_id		m_img_basecolor			= k_id_invalid;
 		anim_id			m_animation				= k_id_invalid;
 
@@ -169,7 +190,7 @@ public:
 		const line_builder& add_transform(const transform& transform) const;
 	};
 
-	mesh_instance& add_mesh_instance(const mesh_id mesh, const shader::slot shdr)
+	mesh_instance& add_mesh_instance(const mesh_id mesh, const modelshader::slot shdr)
 	{
 		m_batch_instance_lookup[{mesh, shdr}].push_back((uint32)m_mesh_instances.size());
 
@@ -222,14 +243,6 @@ public:
 	vector<ui_instance> m_ui_instances;
 	vector<line_instance> m_line_instances;
 	vector<quad_instance> m_quad_instances;
-};
-
-enum class shader_type
-{
-	vs,
-	ps,
-	lib,
-	num
 };
 
 class shaderman final
@@ -756,44 +769,189 @@ class renderman final
 		return m_descheaps[(int)slt];
 	}
 
-	enum pipeline
+	struct shader
 	{
-		cpip_skinning,
-		cpip_num,
-		pip_shadows,
-		pip_shading,
-		pip_wireframe,
-		pip_lines,
-		pip_quads,
-		pip_ui,
-		pip_num = pip_ui - cpip_num + 2
+		enum slot
+		{
+			cs,
+			vs,
+			ps,
+			num
+		};
 	};
 
-	static constexpr bool is_pipeline_compute(pipeline pip)
+	struct stencilop
 	{
-		return pip < cpip_num;
-	}
-	static constexpr bool is_pipeline_graphics(pipeline pip)
-	{
-		return pip > cpip_num && pip < pip_num;
-	}
+		enum condition
+		{
+			on_depth_fail,
+			on_fail,
+			on_pass,
+			num
+		};
+	};
 
-	struct pipeline_desc final
+	struct pipeline final
 	{
-		string m_shaders_filepath;
-		string m_vs_entrypoint;
-		string m_vs_target;
-		string m_ps_entrypoint;
-		string m_ps_target;
-		string m_cs_entrypoint;
-		string m_cs_target;
-		D3D12_GRAPHICS_PIPELINE_STATE_DESC m_desc;
-		D3D12_COMPUTE_PIPELINE_STATE_DESC m_compute_desc;
-		vector<D3D12_INPUT_ELEMENT_DESC> m_input_elements;
+		enum slot
+		{
+			// compute begin
+			skinning,
+			// graphics begin
+			shadows,
+			shading,
+			wireframe,
+			lines,
+			quads,
+			ui,
+			num_total
+		};
+
+		static constexpr bool is_compute(uint32 pip) { return pip < shadows; }
+		static constexpr bool is_graphics(uint32 pip) { return pip >= shadows && pip < num_total; }
+
+		struct builder final
+		{
+			uint64 m_input_elements_byteoffset;
+			vector<D3D12_INPUT_ELEMENT_DESC> m_input_elements;
+			D3D12_GRAPHICS_PIPELINE_STATE_DESC m_graphics_desc;
+			D3D12_COMPUTE_PIPELINE_STATE_DESC m_compute_desc;
+
+			string m_filepath;
+			string m_entrypoints[(uint32)shader::num];
+			string m_targets[(uint32)shader::num];
+
+			builder& filepath(const string& path) { m_filepath = path; return *this; }
+			builder& entrypoint(uint32 shader, const string& path) { m_entrypoints[shader] = path; return *this; }
+			builder& target(uint32 shader, const string& path) { m_targets[shader] = path; return *this; }
+			
+			builder& enable_blend_alpha_to_coverage(bool enabled) { m_graphics_desc.BlendState.AlphaToCoverageEnable = enabled; return *this; }
+			builder& enable_independent_blend(bool enabled) { m_graphics_desc.BlendState.IndependentBlendEnable = enabled; return *this; }
+			builder& enable_stencil(bool enabled) { m_graphics_desc.DepthStencilState.StencilEnable = enabled; return *this; }
+			builder& enable_depth(bool enabled) { m_graphics_desc.DepthStencilState.DepthEnable = enabled; return *this; }
+			builder& depth_function(D3D12_COMPARISON_FUNC func) { m_graphics_desc.DepthStencilState.DepthFunc = func; return *this; }
+			builder& depth_write_mask(D3D12_DEPTH_WRITE_MASK mask) { m_graphics_desc.DepthStencilState.DepthWriteMask = mask; return *this; }
+			builder& dsv_format(DXGI_FORMAT format) { m_graphics_desc.DSVFormat = format; return *this; }
+			builder& cullmode(D3D12_CULL_MODE cullmode) { m_graphics_desc.RasterizerState.CullMode = cullmode; return *this; }
+			builder& fillmode(D3D12_FILL_MODE mode) { m_graphics_desc.RasterizerState.FillMode = mode; return *this; }
+			builder& front_counter_clockwise(bool enabled) { m_graphics_desc.RasterizerState.FrontCounterClockwise = enabled; return *this; }
+			builder& depth_bias(int bias) { m_graphics_desc.RasterizerState.DepthBias = bias; return *this; }
+			builder& depth_bias_clamp(float clamp) { m_graphics_desc.RasterizerState.DepthBiasClamp = clamp; return *this; }
+			builder& depth_bias_slope(float slope) { m_graphics_desc.RasterizerState.SlopeScaledDepthBias = slope; return *this; }
+			builder& sample_mask(uint32 mask)
+			{
+				m_graphics_desc.SampleMask = mask;
+				return *this;
+			}
+			builder& sample_count(uint32 count)
+			{
+				m_graphics_desc.SampleDesc.Count = count;
+				return *this;
+			}
+			builder& sample_quality(uint32 quality)
+			{
+				m_graphics_desc.SampleDesc.Quality = quality;
+				return *this;
+			}
+			builder& primitive_topology_type(D3D12_PRIMITIVE_TOPOLOGY_TYPE type) { m_graphics_desc.PrimitiveTopologyType = type; return *this; }
+			builder& rt_format(uint32 index, DXGI_FORMAT format)
+			{
+				m_graphics_desc.NumRenderTargets = glm::max(index + 1, m_graphics_desc.NumRenderTargets);
+				m_graphics_desc.RTVFormats[index] = format;
+				return *this;
+			}
+			builder& rt_blend_enabled(uint32 index, bool enabled) {}
+			builder& rt_logicop_enabled(uint32 index, bool enabled) {}
+			builder& rt_blend_source_to_dest(uint32 index, D3D12_BLEND src, D3D12_BLEND_OP op, D3D12_BLEND dst)
+			{
+				m_graphics_desc.NumRenderTargets = glm::max(index + 1, m_graphics_desc.NumRenderTargets);
+				m_graphics_desc.BlendState.RenderTarget[index].SrcBlend = src;
+				m_graphics_desc.BlendState.RenderTarget[index].BlendOp = op;
+				m_graphics_desc.BlendState.RenderTarget[index].DestBlend = dst;
+				return *this;
+			}
+			builder& rt_blend_alpha_source_to_dest(uint32 index, D3D12_BLEND src, D3D12_BLEND_OP op, D3D12_BLEND dst)
+			{
+				m_graphics_desc.NumRenderTargets = glm::max(index + 1, m_graphics_desc.NumRenderTargets);
+				m_graphics_desc.BlendState.RenderTarget[index].SrcBlendAlpha = src;
+				m_graphics_desc.BlendState.RenderTarget[index].BlendOpAlpha = op;
+				m_graphics_desc.BlendState.RenderTarget[index].DestBlendAlpha = dst;
+				return *this;
+			}
+			builder& rt_logic_op(uint32 index, D3D12_LOGIC_OP op)
+			{
+				m_graphics_desc.NumRenderTargets = glm::max(index + 1, m_graphics_desc.NumRenderTargets);
+				m_graphics_desc.BlendState.RenderTarget[index].LogicOp = op;
+				m_graphics_desc.BlendState.RenderTarget[index].LogicOpEnable = true;
+				return *this;
+			}
+			builder& rt_write_mask(uint32 index, uint8 mask)
+			{
+				m_graphics_desc.NumRenderTargets = glm::max(index + 1, m_graphics_desc.NumRenderTargets);
+				m_graphics_desc.BlendState.RenderTarget[index].RenderTargetWriteMask = mask;
+				return *this;
+			}
+
+			builder& blend_enable(uint32 index, bool enabled)
+			{
+				m_graphics_desc.BlendState.RenderTarget[index].BlendEnable = enabled;
+				return *this;
+			}
+			builder& dss_stencil_op(uint32 stencilop_slot, D3D12_STENCIL_OP operation, bool frontface = true)
+			{
+				if (frontface)
+				{
+					switch (stencilop_slot)
+					{
+					case stencilop::on_depth_fail: m_graphics_desc.DepthStencilState.FrontFace.StencilDepthFailOp = operation; break;
+					case stencilop::on_fail: m_graphics_desc.DepthStencilState.FrontFace.StencilFailOp = operation; break;
+					case stencilop::on_pass: m_graphics_desc.DepthStencilState.FrontFace.StencilPassOp = operation; break;
+					}
+				}
+				else
+				{
+					switch (stencilop_slot)
+					{
+					case stencilop::on_depth_fail: m_graphics_desc.DepthStencilState.BackFace.StencilDepthFailOp = operation; break;
+					case stencilop::on_fail: m_graphics_desc.DepthStencilState.BackFace.StencilFailOp = operation; break;
+					case stencilop::on_pass: m_graphics_desc.DepthStencilState.BackFace.StencilPassOp = operation; break;
+					}
+				}
+				return *this;
+			}
+
+			builder& push_input_element(DXGI_FORMAT format, const char* semantic_name, uint32 semantic_idx = 0)
+			{
+				m_input_elements.push_back({});
+				m_input_elements.back().AlignedByteOffset = m_input_elements_byteoffset;
+				m_input_elements.back().Format = format;
+				m_input_elements.back().InputSlot = 0u;
+				m_input_elements.back().InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+				m_input_elements.back().InstanceDataStepRate = 0;
+				m_input_elements.back().SemanticIndex = semantic_idx;
+				m_input_elements.back().SemanticName = semantic_name;
+				m_input_elements_byteoffset += (uint32)calculate_format_bytesize(format);
+				return *this;
+			}
+			builder& push_mesh_vertex_inputs()
+			{
+				push_input_element(DXGI_FORMAT_R32G32B32_FLOAT, "SV_POSITION");
+				push_input_element(DXGI_FORMAT_R32G32B32_FLOAT, "NORMAL");
+				push_input_element(DXGI_FORMAT_R32G32_FLOAT, "TEXCOORD", 0);
+				push_input_element(DXGI_FORMAT_R32G32B32A32_UINT, "BLENDINDICES", 0);
+				push_input_element(DXGI_FORMAT_R32G32B32A32_FLOAT, "BLENDWEIGHT", 0);
+				return *this;
+			}
+		};
+
+		pipeline() = default;
+		pipeline(const builder& builder) : m_builder{ builder } {}
+
+		builder m_builder;
 		dxpipeline* m_dxpipeline;
 		dxsignature* m_dxsignature;
 	};
-	vector<pipeline_desc> m_pipelines;
+	vector<pipeline> m_pipelines;
 
 	struct meshbuffers final
 	{
@@ -935,9 +1093,7 @@ class renderman final
 
 public:
 	result<> initialize();
-
-	void compile_shaders();
-	void compile_pipelines();
+	result<> initialize_pipelines();
 
 	result<> state_barrier(dxresource& resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
 	result<> state_barrier(gpu_resource& resource, D3D12_RESOURCE_STATES after);
@@ -995,6 +1151,5 @@ private:
 	void reallocate_image_texture(const contentman& cman, image_id id);
 	bool reallocate_skeleton_buffers(const contentman& cman, skel_id id);
 	bool reallocate_animation_buffers(const contentman& cman, anim_id id);
-	static void populate_vertex_shader_input(renderman::pipeline_desc& pipeline);
 };
 }

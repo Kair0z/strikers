@@ -44,7 +44,7 @@ phx_enabled 1;
 phx_gravity_enabled 0;
 
 # draw
-draw_dbg 1;
+draw_dbg 0;
 draw_dbg_bounds 1;
 draw_dbg_axis 1;
 draw_dbg_transforms 0;

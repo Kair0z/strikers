@@ -196,6 +196,23 @@ class gameman final
 		}
 	};
 
+	float2 get_field_normalized_position(const float3& position) const
+	{
+		const float2 normalized_position = m_field.normalize_position(position);
+		const float2 signed_position = float2(
+			(normalized_position.x * 2) - 1.0f,
+			(normalized_position.y * 2) - 1.0f
+		);
+
+		const float2 camera_relative_signed_position = float2(
+			m_camera.m_initial_right.x < 0.0f ? -signed_position.x : signed_position.x,
+			normalized_position.y
+		);
+		return float2(
+			camera_relative_signed_position.x * 0.5 + 0.5,
+			camera_relative_signed_position.y * 0.5 + 0.5);
+	}
+
 	player m_players[player::num];
 	team m_teams[team::num];
 	goalie m_goalies[team::num];
@@ -294,7 +311,13 @@ class gameman final
 	bool runner_can_charge(uint32 runner_idx)
 	{
 		const uint32 team_idx = runner_get_team_idx(runner_idx);
-		return runner_has_ball_dribble(runner_idx) && 
+
+		const float3 runner_position = actor(m_runners[runner_idx].m_actor).get_position();
+		const float2 field_normalized_position = get_field_normalized_position(runner_position);
+		const bool on_correct_side = (team_idx == team::left && field_normalized_position.x < 0.5f)
+			|| (team_idx == team::right && field_normalized_position.x > 0.5f);
+
+		return on_correct_side && runner_has_ball_dribble(runner_idx) &&
 			!m_teams[team_idx].action_on_cooldown();
 	}
 	bool runner_has_ball_dribble(uint32 runner_idx) const
