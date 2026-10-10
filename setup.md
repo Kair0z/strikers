@@ -1,14 +1,14 @@
 [team_left]
-cb = yoshi;
-lw = yoshi;
-rw = yoshi;
+cb = toad;
+lw = toad;
+rw = toad;
 cap = yoshi;
 goal = kritter;
 
 [team_right]
-cb = yoshi;
-lw = yoshi;
-rw = yoshi;
+cb = toad;
+lw = toad;
+rw = toad;
 cap = yoshi;
 goal = kritter;
 

@@ -8,18 +8,6 @@
 
 ConstantBuffer<cbuffer_global>      c_global            : register(b0);
 
-cbuffer OutlineParams : register(b0)
-{
-    float4 OutlineColor;
-    float Threshold;
-    float Thickness;
-};
-
-float Luminance(float3 c)
-{
-    return dot(c, float3(0.2126, 0.7152, 0.0722));
-}
-
 [Shader("compute")]
 [numthreads(8, 8, 1)]
 void main_cs(uint3 tid : SV_DispatchThreadID)
@@ -41,10 +29,12 @@ void main_cs(uint3 tid : SV_DispatchThreadID)
     uint center = t_bitmap[p];
 
     // Only pixels that are NOT selected can become outline pixels.
-    if ((center & bitflags::outline) != 0)
+    if (bitflags::is_outlined(center))
         return;
 
-    bool outline = false;
+    float4 color = float4(0,0,0,1);
+
+    uint num_outlines = 0;
     static const int2 offsets[8] =
     {
         int2(-1,  0),
@@ -56,18 +46,20 @@ void main_cs(uint3 tid : SV_DispatchThreadID)
         int2(-1,  1),
         int2( 1,  1)
     };
+
     for (uint i = 0; i < 8; ++i)
     {
         int2 q = clamp( p + offsets[i], int2(0, 0), int2(width - 1, height - 1));
         uint neighbor = t_bitmap[q];
 
-        if ((neighbor & bitflags::outline) != 0)
+        if (bitflags::is_outlined(neighbor))
         {
-            outline = true;
+            num_outlines++;
+            color += c_global.player_colors[ bitflags::get_player_index(neighbor) ];
             break;
         }
     }
 
-    if (outline)
-        u_scenecolor[p] = float4(1,0,0,1);
+    if (num_outlines != 0)
+        u_scenecolor[p] = color / num_outlines;
 }

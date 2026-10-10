@@ -132,11 +132,32 @@ class gameman final
 			two,
 			three,
 			four,
+			five,
+			six,
+			seven,
+			eight,
 			num
 		};
 
+		static const color color(uint32 player)
+		{
+			static const strikers::color k_colors[num]
+			{
+				colors::red(),
+				colors::blue(),
+				colors::green(),
+				colors::purple(),
+				colors::red(),
+				colors::white(),
+				colors::white(),
+				colors::white()
+			};
+			return k_colors[player];
+		}
+		
 		uint32 m_team_idx;
 		uint32 m_current_local_runner = runner::captain;
+		uint32 m_init_local_runner = runner::captain;
 		bool m_active = false;
 	};
 
@@ -219,6 +240,7 @@ class gameman final
 	runner m_runners[team::num * runner::num];
 	ball m_ball;
 	field m_field;
+	uint32 m_scores[team::num];
 
 	umap<actor_id, uint32> m_actor_to_runner_idx;
 	umap<actor_id, uint32> m_actor_to_goalie_idx;
@@ -275,6 +297,7 @@ class gameman final
 			m_ball.m_state = ball::state::launching;
 			m_ball.m_launch.m_point_source = actor(rnr.m_actor).get_position();
 			m_ball.m_launch.m_point_dest = dest_point;
+			m_ball.m_launch.m_runner_source = runner_idx;
 		}
 	}
 	void runner_pass(uint32 runner_idx, const uint32 dest_runner)
@@ -337,7 +360,7 @@ class gameman final
 		const uint32 team_idx = runner_get_team_idx(runner_idx);
 		return team_idx == get_team_on_position(actor(m_runners[runner_idx].m_actor).get_position());
 	}
-	bool is_runner_controlled_by_player(uint32 runner_idx) const
+	bool is_runner_controlled_by_player(uint32 runner_idx, uint32* out_player_index = nullptr) const
 	{
 		const uint32 team_idx = runner_get_team_idx(runner_idx);
 		const uint32 local_idx = runner_get_local_idx(runner_idx);
@@ -347,6 +370,10 @@ class gameman final
 				&& m_players[i].m_team_idx == team_idx
 				&& m_players[i].m_current_local_runner == local_idx)
 			{
+				if (out_player_index)
+				{
+					*out_player_index = i;
+				}
 				return true;
 			}
 		}
@@ -370,6 +397,26 @@ class gameman final
 		return count;
 	}
 
+	bool actor_is_runner(actor_id actor, uint32* out_runner_idx = nullptr) const
+	{
+		return m_actor_to_runner_idx.contains(actor, out_runner_idx);
+	}
+	bool actor_is_goal(actor_id actor, uint32* out_goal_idx = nullptr) const
+	{
+		for (uint32 i = 0u; i < team::num; ++i) {
+			if (m_teams[i].m_goal_actor == actor) {
+				if (out_goal_idx) *out_goal_idx = i;
+				return true;
+			}
+		}
+		return false;
+	}
+
+public:
+	uint32 score(uint32 t) const { return m_scores[t]; }
+	uint32 score_left() const { return m_scores[team::left]; }
+	uint32 score_right() const { return m_scores[team::right]; }
+
 public:
 	void start(const contentman& cman);
 
@@ -381,8 +428,9 @@ public:
 	void tick(const tick_context& ctx);
 	void tick_game(const tick_context& ctx);
 	void tick_systems(const tick_context& ctx);
-	void build_renderscene(contentman& cman, renderscene& scene);
+	void build_renderscene(const tick_context& ctx, contentman& cman, renderscene& scene);
 	void detect_collisions();
+	void on_imgui();
 	
 	template <typename _fn>
 	void foreach_collision(actor_id actr, _fn&& func)

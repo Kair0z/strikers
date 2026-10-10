@@ -8,14 +8,19 @@ static const char* k_ps_target = "ps_6_8";
 static const char* k_ps_entry = "main_ps";
 static const char* k_cs_target = "cs_6_8";
 static const char* k_cs_entry = "main_cs";
+static const char* k_ms_entry = "main_ms";
+static const char* k_ms_target = "ms_6_8";
 
 static const char* k_ui_shader_filepath			= DF_FOLDER_SHADERS "ui.hlsl";
 static const char* k_shadows_shader_filepath	= DF_FOLDER_SHADERS "shadows.hlsl";
 static const char* k_shading_shader_filepath	= DF_FOLDER_SHADERS "shading.hlsl";
+static const char* k_imgui_shader_filepath		= DF_FOLDER_SHADERS "imgui.hlsl";
 static const char* k_skinning_shader_filepath	= DF_FOLDER_SHADERS "skinning.hlsl";
 static const char* k_outline_shader_filepath	= DF_FOLDER_SHADERS "outline.hlsl";
 static const char* k_lines_shader_filepath		= DF_FOLDER_SHADERS "lines.hlsl";
 static const char* k_quads_shader_filepath		= DF_FOLDER_SHADERS "quads.hlsl";
+static const char* k_text_shader_filepath		= DF_FOLDER_SHADERS "text.hlsl";
+static const char* k_trails_shader_filepath		= DF_FOLDER_SHADERS "trails.hlsl";
 static const char* k_shader_include_folder		= "D:/Git/strikers/hlsl";
 
 static const char* k_vsps_entrypoints[]{ k_vs_entry, k_ps_entry };
@@ -31,55 +36,6 @@ static const char* k_vs_shaders[]{
 };
 
 namespace strikers {
-static string hr_to_string(HRESULT hr)
-{
-	char* msg = nullptr;
-	DWORD flags =
-		FORMAT_MESSAGE_ALLOCATE_BUFFER |
-		FORMAT_MESSAGE_FROM_SYSTEM |
-		FORMAT_MESSAGE_IGNORE_INSERTS;
-
-	DWORD size = FormatMessageA(
-		flags,
-		nullptr,
-		hr,
-		0,
-		(LPSTR)&msg,
-		0,
-		nullptr
-	);
-
-	string result;
-	if (size && msg) result = msg;
-	else result = "Unknown HRESULT";
-
-	if (msg) LocalFree(msg);
-	return result;
-}
-static DxcBuffer blob_encoding_to_dxc(IDxcBlobEncoding* encoding)
-{
-	DxcBuffer result;
-	int encoding_known = false; uint32 code_page;
-	if (SUCCEEDED(encoding->GetEncoding(&encoding_known, &code_page)))
-	{
-		result.Encoding = code_page;
-	}
-
-	result.Ptr = encoding->GetBufferPointer();
-	result.Size = encoding->GetBufferSize();
-	return result;
-}
-static void release_if_valid(IUnknown* anything)
-{
-	if (anything != nullptr)
-	{
-		anything->Release();
-	}
-}
-static void release_if_valid(gpu_resource& resource)
-{
-	release_if_valid(resource.m_resource);
-}
 
 result<> shaderman::compile_shader(
 	const stringview& filepath, 
@@ -177,6 +133,47 @@ result<> shaderman::compile_shader(
 	return restype::make_success();
 }
 
+struct pipeline_subobject_builder
+{
+	vector<byte> m_bytes{};
+
+	template <typename _d>
+	pipeline_subobject_builder& push(
+		D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type,
+		const _d& data)
+	{
+		struct alignas(void*) subobject
+		{
+			D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type;
+			_d data;
+		};
+
+		subobject item{};
+		memcpy(&item.data, &data, sizeof(_d));
+		memcpy(&item.type, &type, sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE));
+
+		const size_t offset = m_bytes.size();
+		m_bytes.resize(offset + sizeof(item));
+
+		memcpy(m_bytes.data() + offset, &item, sizeof(item));
+
+		return *this;
+	}
+
+	static constexpr D3D12_PIPELINE_STATE_SUBOBJECT_TYPE subobject_type(uint32 sh) {
+		switch (sh) {
+		case shader::cs: return D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS;
+		case shader::ms: return D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS;
+		case shader::vs: return D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS;
+		case shader::ps: return D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS;
+		default:
+			return D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MAX_VALID;
+		}
+	};
+};
+
+
+
 result<> renderman::initialize_pipelines()
 {
 	using restype = result<>;
@@ -203,7 +200,7 @@ result<> renderman::initialize_pipelines()
 		// mesh pipelines (using mesh vertex buffers)
 		{
 			pipeline::builder common_builder{};
-			common_builder
+			m_pipelines[pipeline::shading] = pipeline(common_builder
 				// shaders
 				.filepath(k_shading_shader_filepath)
 				.entrypoint(shader::vs, k_vs_entry)
@@ -225,24 +222,25 @@ result<> renderman::initialize_pipelines()
 				.sample_count(1)
 				.sample_mask(0xFFFFFFFF)
 				// render targets
-				.rt_format(0, DXGI_FORMAT_R8G8B8A8_UNORM)
-				.rt_write_mask(0, 0xf)
-				.rt_blend_source_to_dest(0, D3D12_BLEND_SRC_ALPHA, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA)
-				.rt_blend_alpha_source_to_dest(0, D3D12_BLEND_ONE, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA);
-			m_pipelines[pipeline::shading] = pipeline(common_builder);
+				.format(DXGI_FORMAT_R8G8B8A8_UNORM)
+				.write_mask(0xf)
+				.blend_source_to_dest(D3D12_BLEND_SRC_ALPHA, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA)
+				.blend_alpha_source_to_dest(D3D12_BLEND_ONE, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA)
+			);
 
 			// shaded - wireframe
-			common_builder
-				.fillmode(D3D12_FILL_MODE_WIREFRAME);
-			m_pipelines[pipeline::wireframe] = pipeline(common_builder);
+			m_pipelines[pipeline::wireframe] = pipeline(common_builder
+				.fillmode(D3D12_FILL_MODE_WIREFRAME)
+			);
 
 			// shadows
-			common_builder
+			m_pipelines[pipeline::shadows] = pipeline(common_builder
 				.fillmode(D3D12_FILL_MODE_SOLID)
 				.filepath(k_shadows_shader_filepath)
+				// no pixel shader
 				.entrypoint(shader::ps, "")
-				.target(shader::ps, "");
-			m_pipelines[pipeline::shadows] = pipeline(common_builder);
+				.target(shader::ps, "")
+			);
 		}
 		
 		// special geometry pipelines
@@ -265,25 +263,90 @@ result<> renderman::initialize_pipelines()
 				.sample_count(1)
 				.sample_mask(0xFFFFFFFF)
 				// render targets
-				.rt_format(0, DXGI_FORMAT_R8G8B8A8_UNORM)
-				.rt_write_mask(0, 0xf)
-				.rt_blend_source_to_dest(0, D3D12_BLEND_SRC_ALPHA, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA)
-				.rt_blend_alpha_source_to_dest(0, D3D12_BLEND_ONE, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA);
-		
-			common_builder
+				.format(DXGI_FORMAT_R8G8B8A8_UNORM)
+				.write_mask(0xf);
+
+			m_pipelines[pipeline::lines] = pipeline(common_builder
 				.filepath(k_lines_shader_filepath)
-				.primitive_topology_type(D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE);
-			m_pipelines[pipeline::lines] = pipeline(common_builder);
+				.primitive_topology_type(D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE)
+			);
 
-			common_builder
+			m_pipelines[pipeline::quads] = pipeline(common_builder
 				.filepath(k_quads_shader_filepath)
-				.primitive_topology_type(D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE);
-			m_pipelines[pipeline::quads] = pipeline(common_builder);
+				.primitive_topology_type(D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE)
+			);
 
-			common_builder
+			m_pipelines[pipeline::ui] = pipeline(common_builder
 				.filepath(k_ui_shader_filepath)
-				.primitive_topology_type(D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE);
-			m_pipelines[pipeline::ui] = pipeline(common_builder);
+				.primitive_topology_type(D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE)
+				.blend_enabled(true)
+				.blend_source_to_dest(D3D12_BLEND_SRC_ALPHA, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA)
+				.blend_alpha_source_to_dest(D3D12_BLEND_ONE, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA)
+			);
+
+			m_pipelines[pipeline::text] = pipeline(common_builder
+				.filepath(k_text_shader_filepath)
+			);
+		}
+
+		// trails pipeline
+		{
+			m_pipelines[pipeline::trails] = pipeline(pipeline::builder()
+				.filepath(k_trails_shader_filepath)
+				.entrypoint(shader::ms, k_ms_entry)
+				.target(shader::ms, k_ms_target)
+				.entrypoint(shader::ps, k_ps_entry)
+				.target(shader::ps, k_ps_target)
+				// depth & stencil
+				.enable_depth(true)
+				.depth_function(D3D12_COMPARISON_FUNC_LESS)
+				.depth_write_mask(D3D12_DEPTH_WRITE_MASK_ALL)
+				.dsv_format(DXGI_FORMAT_D32_FLOAT)
+				// rasterizer
+				.primitive_topology_type(D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE)
+				.cullmode(D3D12_CULL_MODE_NONE)
+				.fillmode(D3D12_FILL_MODE_SOLID)
+				// sampling
+				.sample_count(1)
+				.sample_mask(0xFFFFFFFF)
+				// render targets (blending)
+				.format(DXGI_FORMAT_R8G8B8A8_UNORM)
+				.write_mask(0xf)
+				.blend_source_to_dest(D3D12_BLEND_SRC_ALPHA, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA)
+				.blend_alpha_source_to_dest(D3D12_BLEND_ONE, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA)
+			);
+		}
+
+		// imgui pipeline 
+		{
+			m_pipelines[pipeline::imgui] = pipeline(pipeline::builder()
+				.filepath(k_imgui_shader_filepath)
+				.entrypoint(shader::vs, k_vs_entry)
+				.entrypoint(shader::ps, k_ps_entry)
+				.target(shader::vs, k_vs_target)
+				.target(shader::ps, k_ps_target)
+				// vs_inputs
+				.push_input_element(DXGI_FORMAT_R32G32_FLOAT, "POSITION")
+				.push_input_element(DXGI_FORMAT_R32G32_FLOAT, "TEXCOORD")
+				.push_input_element(DXGI_FORMAT_R8G8B8A8_UNORM, "COLOR", 0)
+				// depth & stencil
+				.enable_depth(true)
+				.depth_function(D3D12_COMPARISON_FUNC_ALWAYS)
+				.depth_write_mask(D3D12_DEPTH_WRITE_MASK_ALL)
+				.dsv_format(DXGI_FORMAT_D32_FLOAT)
+				// rasterizer
+				.primitive_topology_type(D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE)
+				.cullmode(D3D12_CULL_MODE_NONE)
+				.fillmode(D3D12_FILL_MODE_SOLID)
+				// sampling
+				.sample_count(1)
+				.sample_mask(0xFFFFFFFF)
+				// render targets (blending)
+				.format(DXGI_FORMAT_R8G8B8A8_UNORM)
+				.write_mask(0xf)
+				.blend_source_to_dest(D3D12_BLEND_SRC_ALPHA, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA)
+				.blend_alpha_source_to_dest(D3D12_BLEND_ONE, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA)
+			);
 		}
 	}
 
@@ -305,49 +368,67 @@ result<> renderman::initialize_pipelines()
 		for (uint32 p = 0u; p < m_pipelines.size(); ++p)
 		{
 			pipeline& pip = m_pipelines[p];
+			pipeline_subobject_builder builder{};
+
+			// push the shader subobjects
+			dxsignature* first_valid_signature = nullptr;
+			for (uint32 s = 0u; s < shader::num; ++s) {
+				const auto& entry = pip.m_builder.m_entrypoints[s];
+				const auto& target = pip.m_builder.m_targets[s];
+				if (!entry.empty() && !target.empty()) {
+					const auto& shdr = m_shaderman.get_shader(pip.m_builder.m_filepath, entry, target).claim();
+					builder.push(pipeline_subobject_builder::subobject_type(s), shdr->m_shader_bytecode);
+					
+					if (shdr->m_signature && first_valid_signature == nullptr) {
+						first_valid_signature = shdr->m_signature;
+					}
+				}
+			}
+			pip.m_dxsignature = first_valid_signature;
+
 			if (pipeline::is_compute(p))
 			{
-				const auto& cs_shader = m_shaderman.get_shader(
-					pip.m_builder.m_filepath, pip.m_builder.m_entrypoints[shader::cs], pip.m_builder.m_targets[shader::cs]).claim();
-
-				D3D12_COMPUTE_PIPELINE_STATE_DESC& pipeline_desc = pip.m_builder.m_compute_desc;
-				pipeline_desc.CS = cs_shader->m_shader_bytecode;
-				pipeline_desc.pRootSignature = cs_shader->m_signature;
-				pip.m_dxsignature = cs_shader->m_signature;
-				HRESULT hres = m_device->CreateComputePipelineState(&pipeline_desc, IID_PPV_ARGS(&pip.m_dxpipeline));
-				if (!SUCCEEDED(hres))
-				{
-					int a = 0; // todo: do something...
-				}
+				builder.push(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, first_valid_signature);
 			}
 			else if (pipeline::is_graphics(p))
 			{
-				pip.m_builder.m_graphics_desc.InputLayout.NumElements = (uint32)pip.m_builder.m_input_elements.size();
-				pip.m_builder.m_graphics_desc.InputLayout.pInputElementDescs = pip.m_builder.m_input_elements.data();
+				auto& graphics_desc = pip.m_builder.m_graphics_desc;
+				
+				D3D12_RT_FORMAT_ARRAY rt_array{};
+				rt_array.NumRenderTargets = graphics_desc.NumRenderTargets;
+				memcpy(rt_array.RTFormats, graphics_desc.RTVFormats, sizeof(rt_array.RTFormats));
 
-				const string& filepath = pip.m_builder.m_filepath;
-				const string& vs_entrypoint = pip.m_builder.m_entrypoints[shader::vs];
-				const string& ps_entrypoint = pip.m_builder.m_entrypoints[shader::ps];
-				const string& vs_target = pip.m_builder.m_targets[shader::vs];
-				const string& ps_target = pip.m_builder.m_targets[shader::ps];
-				const auto& vs_shader = m_shaderman.get_shader(filepath, vs_entrypoint, vs_target).claim();
-
-				D3D12_GRAPHICS_PIPELINE_STATE_DESC& pipeline_desc = pip.m_builder.m_graphics_desc;
-				pipeline_desc.VS = vs_shader->m_shader_bytecode;
-				pipeline_desc.pRootSignature = vs_shader->m_signature;
-				pip.m_dxsignature = vs_shader->m_signature;
-
-				if (!ps_entrypoint.empty() && !ps_target.empty())
-				{
-					auto& ps_shader = m_shaderman.get_shader(filepath, ps_entrypoint, ps_target).claim();
-					if (ps_shader) pipeline_desc.PS = ps_shader->m_shader_bytecode;
+				graphics_desc.InputLayout.NumElements = (uint32)pip.m_builder.m_input_elements.size();
+				for (uint32 i = 0u; i < pip.m_builder.m_input_elements.size(); ++i) {
+					graphics_desc.InputLayout.pInputElementDescs = pip.m_builder.m_input_elements.data();
 				}
 
-				HRESULT hres = m_device->CreateGraphicsPipelineState(&pipeline_desc, IID_PPV_ARGS(&pip.m_dxpipeline));
-				if (!SUCCEEDED(hres))
-				{
-					int a = 0; // todo: do something...
-				}
+				builder
+					.push(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, first_valid_signature)
+					.push(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, graphics_desc.BlendState)
+					.push(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK, graphics_desc.SampleMask)
+					.push(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER, graphics_desc.RasterizerState)
+					.push(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL, graphics_desc.DepthStencilState)
+					.push(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT, graphics_desc.InputLayout)
+					.push(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT, graphics_desc.StreamOutput)
+					.push(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE, graphics_desc.IBStripCutValue)
+					.push(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY, graphics_desc.PrimitiveTopologyType)
+					.push(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS, rt_array)
+					.push(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT, graphics_desc.DSVFormat)
+					.push(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC, graphics_desc.SampleDesc)
+					.push(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_NODE_MASK, graphics_desc.NodeMask)
+					.push(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO, graphics_desc.CachedPSO)
+					.push(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS, graphics_desc.Flags)
+					;
+			}
+
+			D3D12_PIPELINE_STATE_STREAM_DESC desc{};
+			desc.pPipelineStateSubobjectStream = builder.m_bytes.data();
+			desc.SizeInBytes = builder.m_bytes.size();
+			HRESULT hres = m_device->CreatePipelineState(&desc, IID_PPV_ARGS(&pip.m_dxpipeline));
+			if (!SUCCEEDED(hres)) {
+				int a = 0;
+				// todo: do something...
 			}
 		}
 	}
@@ -394,24 +475,51 @@ result<> renderman::initialize()
 		if (device)
 		{
 			m_adapter = chosen_adapter;
-			m_device = device;
-			break;
 
-			D3D12_FEATURE_DATA_D3D12_OPTIONS21 options = {};
-			device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS21, &options, sizeof(options));
-			workgraphs_tier = options.WorkGraphsTier;
-			if (workgraphs_tier != D3D12_WORK_GRAPHS_TIER_NOT_SUPPORTED)
+			// check features
+			bool device_is_good_enough = true;
+
+			// require workgraphs
 			{
-				m_adapter = chosen_adapter;
-				m_device = device;
-				break;
+				D3D12_FEATURE_DATA_D3D12_OPTIONS21 options = {};
+				device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS21, &options, sizeof(options));
+				if (options.WorkGraphsTier == D3D12_WORK_GRAPHS_TIER_NOT_SUPPORTED)
+				{
+					// device_is_good_enough = false;
+				}
+			}
+
+			// require mesh shaders
+			{
+				D3D12_FEATURE_DATA_D3D12_OPTIONS7 options = {};
+				device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &options, sizeof(options));
+				if (options.MeshShaderTier == D3D12_MESH_SHADER_TIER_NOT_SUPPORTED)
+				{
+					device_is_good_enough = false;
+				}
+			}
+
+			// require specific device
+			dxdevice* specific_device;
+			if (!SUCCEEDED(device->QueryInterface(&specific_device)))
+			{
+				device_is_good_enough = false;
+			}
+
+			if (!device_is_good_enough)
+			{
+				device->Release();
+				return restype::make_fail("device is not good enough (your GPU is trash)");
 			}
 			else
 			{
-				device->Release();
+				m_device = specific_device;
+				m_adapter = chosen_adapter;
+				break;
 			}
 		}
 	}
+
 	if (m_adapter == nullptr || m_device == nullptr)
 	{
 		return restype::make_fail("renderman::initialize() failed > querying all adapters, none could create the graphics device!");
@@ -545,20 +653,19 @@ result<> renderman::initialize()
 		m_bitmap.m_resource = gpu_resource::allocate(*m_device, gpu_resource::builder()
 			.texture2D(scenecolor_resolution)
 			.create_flags(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
-			.format(DXGI_FORMAT_R8_TYPELESS)
+			.format(DXGI_FORMAT_R32_TYPELESS)
 		).claim();
 		m_bitmap.m_uav = create_resource_descriptor(m_bitmap.m_resource, descriptor::builder()
 			.type(descriptor::uav)
-			.format(DXGI_FORMAT_R8_UINT)
+			.format(DXGI_FORMAT_R32_UINT)
 		).claim();
 		m_bitmap.m_srv = create_resource_descriptor(m_bitmap.m_resource, descriptor::builder()
 			.type(descriptor::srv)
-			.format(DXGI_FORMAT_R8_UINT)
+			.format(DXGI_FORMAT_R32_UINT)
 		).claim();
 	}
 	// allocate scenecolor
 	{
-		
 		m_scenecolor.m_resource_color = gpu_resource::allocate(*m_device, gpu_resource::builder()
 			.texture2D(scenecolor_resolution)
 			.create_flags(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
@@ -585,6 +692,15 @@ result<> renderman::initialize()
 		m_scenecolor.m_dsv = create_resource_descriptor(m_scenecolor.m_resource_depth, descriptor::builder()
 			.type(descriptor::dsv)
 			.format(DXGI_FORMAT_D32_FLOAT)
+		).claim();
+	}
+	// allocate glyph atlas (text rendering)
+	{
+		gpu_resource& atlas = m_textbuffers.m_glyph_atlas;
+		atlas = gpu_resource::allocate(*m_device, gpu_resource::builder()
+			.texture2D(512, 512)
+			.create_flags(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+			.format(DXGI_FORMAT_R32_TYPELESS)
 		).claim();
 	}
 
@@ -660,8 +776,6 @@ void renderman::render_meshbatches(renderscene& scene, const contentman& cman, c
 
 void renderman::render(renderscene& scene, const contentman& cman)
 {
-	process_scene_instances(scene, cman);
-
 	// wait for previous frame
 	uint64 fence_value = m_frame_fence->GetCompletedValue();
 	while (fence_value < m_frame)
@@ -669,24 +783,36 @@ void renderman::render(renderscene& scene, const contentman& cman)
 		fence_value = m_frame_fence->GetCompletedValue();
 	}
 
-	const uint32 current_swapchain_idx = 0;
-	swapchain& swapchain = m_swapchains[current_swapchain_idx];
-	const uint2 backbuffer_size = swapchain.m_current_size;
-
 	m_cmd_allocator->Reset();
 	m_cmdlist->Reset(m_cmd_allocator, nullptr);
 
-	// clear & re-bind global GPU descriptor heaps
-	clear_gpu_heaps();
+	// it's important this happens before any descriptors are pushed!
+	reset_bindless_heaps();
+
+	// process all instances (and the content they expect to render)
+	process_scene_instances(scene, cman);
 	
 	dxdescheap* global_descheaps[]{
 		get_descheap(descriptor_heap::gpu_resource).m_dxheap,
 		get_descheap(descriptor_heap::gpu_sampler).m_dxheap
 	};
 	m_cmdlist->SetDescriptorHeaps(_countof(global_descheaps), global_descheaps);
-	m_cmdlist->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-	// upload all pending textures & meshbuffer copies (stored in staging)
+	const uint32 current_swapchain_idx = 0;
+	swapchain& swapchain = m_swapchains[current_swapchain_idx];
+	const uint2 backbuffer_size = swapchain.m_current_size;
+	D3D12_VIEWPORT viewport{};
+	viewport.Height = (float)backbuffer_size.y;
+	viewport.Width = (float)backbuffer_size.x;
+	viewport.MinDepth = 0;
+	viewport.MaxDepth = 1;
+	D3D12_RECT scissor{};
+	scissor.left = 0;
+	scissor.right = backbuffer_size.x;
+	scissor.bottom = backbuffer_size.y;
+	scissor.top = 0;
+
+	// upload all pending textures & meshbuffer copies (stored in staging buffers)
 	upload_cpu_to_gpu();
 	
 	// [skinning]
@@ -700,7 +826,7 @@ void renderman::render(renderscene& scene, const contentman& cman)
 	const uint32 num_bone_instances = m_bone_buffers.total_num_bone_instances();
 	if (num_bone_instances > 0)
 	{
-		PIXScopedEvent(m_cmdlist, 0u, "[cpip_skinning]");
+		PIXScopedEvent(m_cmdlist, 0u, "[skinning]");
 
 		m_cmdlist->SetPipelineState(m_pipelines[pipeline::skinning].m_dxpipeline);
 		m_cmdlist->SetComputeRootSignature(m_pipelines[pipeline::skinning].m_dxsignature);
@@ -718,6 +844,10 @@ void renderman::render(renderscene& scene, const contentman& cman)
 	
 	const descheap& rtv_heap = get_descheap(descriptor_heap::rtv);
 	const descheap& dsv_heap = get_descheap(descriptor_heap::dsv);
+
+	D3D12_CPU_DESCRIPTOR_HANDLE scenecolor_rtv, scenecolor_dsv;
+	rtv_heap.get_handles(m_scenecolor.m_rtv.m_heap_idx, &scenecolor_rtv).claim();
+	dsv_heap.get_handles(m_scenecolor.m_dsv.m_heap_idx, &scenecolor_dsv).claim();
 
 	// [shadow rendering]
 	if (scene.any_meshes())
@@ -754,7 +884,7 @@ void renderman::render(renderscene& scene, const contentman& cman)
 		m_cmdlist->RSSetViewports(1, &viewport);
 		m_cmdlist->RSSetScissorRects(1, &scissor);
 
-		PIXScopedEvent(m_cmdlist, 0u, "[pip_shadows]");
+		PIXScopedEvent(m_cmdlist, 0u, "[shadows]");
 		m_cmdlist->SetPipelineState(m_pipelines[pipeline::shadows].m_dxpipeline);
 		m_cmdlist->SetGraphicsRootSignature(m_pipelines[pipeline::shadows].m_dxsignature);
 		m_cmdlist->SetGraphicsRootConstantBufferView(0, m_cbuffers.resource(cbuffer::view, view::light).gpu_address());
@@ -770,25 +900,10 @@ void renderman::render(renderscene& scene, const contentman& cman)
 	state_barrier(m_scenecolor.m_resource_color, D3D12_RESOURCE_STATE_RENDER_TARGET);
 	state_barrier(m_scenecolor.m_resource_depth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 	{
-		D3D12_CPU_DESCRIPTOR_HANDLE backbuffer_rtv_handle, backbuffer_dsv_handle;
-		rtv_heap.get_handles(m_scenecolor.m_rtv.m_heap_idx, &backbuffer_rtv_handle).claim();
-		dsv_heap.get_handles(m_scenecolor.m_dsv.m_heap_idx, &backbuffer_dsv_handle).claim();
-
-		D3D12_VIEWPORT viewport{};
-		viewport.Height = (float)backbuffer_size.y;
-		viewport.Width = (float)backbuffer_size.x;
-		viewport.MinDepth = 0;
-		viewport.MaxDepth = 1;
-		D3D12_RECT scissor{};
-		scissor.left = 0;
-		scissor.right = backbuffer_size.x;
-		scissor.bottom = backbuffer_size.y;
-		scissor.top = 0;
-
 		static float k_clear_color[4]{ 0.1f,0.1f,0.1f,1.0f };
-		m_cmdlist->ClearRenderTargetView(backbuffer_rtv_handle, k_clear_color, 0, nullptr);
-		m_cmdlist->ClearDepthStencilView(backbuffer_dsv_handle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0u, 0u, nullptr);
-		m_cmdlist->OMSetRenderTargets(1, &backbuffer_rtv_handle, true, &backbuffer_dsv_handle);
+		m_cmdlist->ClearRenderTargetView(scenecolor_rtv, k_clear_color, 0, nullptr);
+		m_cmdlist->ClearDepthStencilView(scenecolor_dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0u, 0u, nullptr);
+		m_cmdlist->OMSetRenderTargets(1, &scenecolor_rtv, true, &scenecolor_dsv);
 		m_cmdlist->RSSetViewports(1, &viewport);
 		m_cmdlist->RSSetScissorRects(1, &scissor);
 
@@ -807,8 +922,8 @@ void renderman::render(renderscene& scene, const contentman& cman)
 			};
 			static const char* k_shader_names[]
 			{
-				"pip_shading",
-				"pip_wireframe"
+				"shading",
+				"shading:wireframe"
 			};
 
 			// for each shader, draw a bunch of shaded instances
@@ -849,29 +964,34 @@ void renderman::render(renderscene& scene, const contentman& cman)
 		// quad passes: pip_quads
 		if (!scene.m_quad_instances.empty())
 		{
-			PIXScopedEvent(m_cmdlist, 0u, "quads");
+			PIXScopedEvent(m_cmdlist, 0u, "Scene Quads");
 			m_cmdlist->SetPipelineState(m_pipelines[pipeline::quads].m_dxpipeline);
 			m_cmdlist->SetGraphicsRootSignature(m_pipelines[pipeline::quads].m_dxsignature);
 		
 			const uint32 num_instances = (uint32)scene.m_quad_instances.size();
 			m_cmdlist->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-			m_cmdlist->SetGraphicsRootConstantBufferView(0, m_cbuffers.resource(cbuffer::global).m_resource->GetGPUVirtualAddress());
-			m_cmdlist->SetGraphicsRootConstantBufferView(1, m_cbuffers.resource(cbuffer::view, view::main).m_resource->GetGPUVirtualAddress());
+			m_cmdlist->SetGraphicsRootConstantBufferView(0, m_cbuffers.resource(cbuffer::global).gpu_address());
+			m_cmdlist->SetGraphicsRootConstantBufferView(1, m_cbuffers.resource(cbuffer::view, view::main).gpu_address());
 			m_cmdlist->SetGraphicsRootShaderResourceView(2, m_instancebuffer_quads.m_resource->GetGPUVirtualAddress());
 			m_cmdlist->DrawInstanced(6, num_instances, 0, 0);
 		}
 
-		// ui passes: pip_ui
-		if (!scene.m_ui_instances.empty())
+		ID3D12GraphicsCommandList6* cmdlist6 = nullptr;
+		const bool any_trails = !m_trailbuffers.m_trails.empty() && m_trailbuffers.m_points.size() != 0;
+		if (any_trails && SUCCEEDED(m_cmdlist->QueryInterface(IID_PPV_ARGS(&cmdlist6))))
 		{
-			PIXScopedEvent(m_cmdlist, 0u, "UI");
-		
-			m_cmdlist->SetPipelineState(m_pipelines[pipeline::ui].m_dxpipeline);
-			m_cmdlist->SetGraphicsRootSignature(m_pipelines[pipeline::ui].m_dxsignature);
-			const uint32 num_instances = (uint32)scene.m_ui_instances.size();
+			// trail passes
+			PIXScopedEvent(m_cmdlist, 0u, "[trails]");
+			m_cmdlist->SetPipelineState(m_pipelines[pipeline::trails].m_dxpipeline);
+			m_cmdlist->SetGraphicsRootSignature(m_pipelines[pipeline::trails].m_dxsignature);
 			m_cmdlist->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-			m_cmdlist->SetGraphicsRootShaderResourceView(1, m_instancebuffer_ui.m_resource->GetGPUVirtualAddress());
-			m_cmdlist->DrawInstanced(6, num_instances, 0, 0);
+			m_cmdlist->SetGraphicsRootConstantBufferView(0, m_cbuffers.resource(cbuffer::global).gpu_address());
+			m_cmdlist->SetGraphicsRootConstantBufferView(1, m_cbuffers.resource(cbuffer::view, view::main).gpu_address());
+			m_cmdlist->SetGraphicsRootShaderResourceView(2, m_trailbuffers.m_point_buffer.gpu_address());
+			m_cmdlist->SetGraphicsRootShaderResourceView(3, m_trailbuffers.m_trail_buffer.gpu_address());
+
+			const uint32 num_groups = m_trailbuffers.m_trails.size();
+			cmdlist6->DispatchMesh(num_groups, 1, 1);
 		}
 	}
 
@@ -880,14 +1000,81 @@ void renderman::render(renderscene& scene, const contentman& cman)
 	state_barrier(m_scenecolor.m_resource_color, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 	state_barrier(m_bitmap.m_resource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 	{
-		PIXScopedEvent(m_cmdlist, 0u, "[outline]");
+		PIXScopedEvent(m_cmdlist, 0u, "[pp:outline]");
 
 		m_cmdlist->SetPipelineState(m_pipelines[pipeline::outline].m_dxpipeline);
 		m_cmdlist->SetComputeRootSignature(m_pipelines[pipeline::outline].m_dxsignature);
 		m_cmdlist->SetComputeRootConstantBufferView(0u, m_cbuffers.resource(cbuffer::global).gpu_address());
 
 		static const uint32 group_size = 8; // todo: make this non-hardcoded? honestly not a big deal...
-		m_cmdlist->Dispatch(backbuffer_size.x / group_size, backbuffer_size.y / group_size, 1);
+		m_cmdlist->Dispatch(
+			m_scenecolor.m_resource_color.m_resource->GetDesc().Width / group_size, 
+			m_scenecolor.m_resource_color.m_resource->GetDesc().Height / group_size, 1);
+	}
+
+	// [scenecolor ui]
+	// > instanced ui
+	// > imgui
+	// > text rendering
+	state_barrier(m_scenecolor.m_resource_color, D3D12_RESOURCE_STATE_RENDER_TARGET);
+	m_cmdlist->OMSetRenderTargets(1, &scenecolor_rtv, true, &scenecolor_dsv);
+	m_cmdlist->RSSetViewports(1, &viewport);
+	m_cmdlist->RSSetScissorRects(1, &scissor);
+	if (!scene.m_ui_instances.empty())
+	{
+		PIXScopedEvent(m_cmdlist, 0u, "[ui]");
+		m_cmdlist->SetPipelineState(m_pipelines[pipeline::ui].m_dxpipeline);
+		m_cmdlist->SetGraphicsRootSignature(m_pipelines[pipeline::ui].m_dxsignature);
+		const uint32 num_instances = (uint32)scene.m_ui_instances.size();
+		m_cmdlist->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		m_cmdlist->SetGraphicsRootShaderResourceView(0, m_instancebuffer_ui.m_resource->GetGPUVirtualAddress());
+		m_cmdlist->DrawInstanced(6, num_instances, 0, 0);
+	}
+	if (!scene.m_imgui_mesh.empty())
+	{
+		PIXScopedEvent(m_cmdlist, 0u, "[imgui]");
+		m_cmdlist->SetPipelineState(m_pipelines[pipeline::imgui].m_dxpipeline);
+		m_cmdlist->SetGraphicsRootSignature(m_pipelines[pipeline::imgui].m_dxsignature);
+
+		const auto& imgui_mesh = scene.m_imgui_mesh;
+		const auto& vertbuffer = m_imgui_buffers.m_resources[imgui_buffers::vert];
+		const auto& indbuffer = m_imgui_buffers.m_resources[imgui_buffers::ind];
+
+		D3D12_VERTEX_BUFFER_VIEW vtv;
+		vtv.BufferLocation = vertbuffer.gpu_address();
+		vtv.SizeInBytes = (uint32)vertbuffer.m_resource->GetDesc().Width;
+		vtv.StrideInBytes = sizeof(hlsl::imgui_vertex);
+		D3D12_INDEX_BUFFER_VIEW ibv;
+		ibv.BufferLocation = indbuffer.gpu_address();
+		ibv.SizeInBytes = (uint32)indbuffer.m_resource->GetDesc().Width;
+		ibv.Format = DXGI_FORMAT_R32_UINT;
+		m_cmdlist->IASetVertexBuffers(0u, 1, &vtv);
+		m_cmdlist->IASetIndexBuffer(&ibv);
+		m_cmdlist->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		m_cmdlist->SetGraphicsRootConstantBufferView(0, m_cbuffers.resource(cbuffer::global).gpu_address());
+		for (uint32 m = 0u; m < imgui_mesh.m_mesh_index_starts.size(); ++m)
+		{
+			const bool is_last = m == imgui_mesh.m_mesh_index_starts.size() - 1;
+			const uint32 index_start = imgui_mesh.m_mesh_index_starts[m];
+			const uint32 vertex_start = imgui_mesh.m_mesh_vertex_starts[m];
+			const uint32 num_instances = imgui_mesh.m_mesh_num_instances[m];
+			const uint32 num_indices = (!is_last ? imgui_mesh.m_mesh_index_starts[m + 1] - index_start : imgui_mesh.m_indices.size() - index_start);
+			const uint32 num_vertices = (!is_last ? imgui_mesh.m_mesh_vertex_starts[m + 1] - vertex_start : imgui_mesh.m_vertices.size() - vertex_start);
+			m_cmdlist->DrawIndexedInstanced(num_indices, num_instances, index_start, vertex_start, 0);
+		}
+	}
+
+	if (!scene.m_text_instances.empty())
+	{
+		PIXScopedEvent(m_cmdlist, 0u, "[text]");
+		m_cmdlist->SetPipelineState(m_pipelines[pipeline::text].m_dxpipeline);
+		m_cmdlist->SetGraphicsRootSignature(m_pipelines[pipeline::text].m_dxsignature);
+		const uint32 num_instances = (uint32)m_textbuffers.m_glyph_instances.size();
+		m_cmdlist->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		m_cmdlist->SetGraphicsRootShaderResourceView(0, m_textbuffers.m_instance_buffer.gpu_address());
+		m_cmdlist->SetGraphicsRootShaderResourceView(1, m_textbuffers.m_glyph_buffer.gpu_address());
+		m_cmdlist->SetGraphicsRootShaderResourceView(2, m_textbuffers.m_curve_buffer.gpu_address());
+		m_cmdlist->DrawInstanced(6, num_instances, 0, 0);
 	}
 
 	// [scenecolor > copy > backbuffer]
@@ -938,7 +1125,7 @@ void renderman::process_scene_instances(renderscene& scene, const contentman& cm
 
 		// (re) allocate the ui instance buffer
 		const uint32 num_ui_instances = (uint32)scene.m_ui_instances.size();;
-		const uint64 ui_instancebuffer_bytesize = sizeof(gpu_ui_instance) * num_ui_instances;
+		const uint64 ui_instancebuffer_bytesize = sizeof(hlsl::ui_instance) * num_ui_instances;
 		if (!m_instancebuffer_ui.is_valid() || m_instancebuffer_ui.m_resource->GetDesc().Width < ui_instancebuffer_bytesize)
 		{
 			release_if_valid(m_instancebuffer_ui);
@@ -952,7 +1139,7 @@ void renderman::process_scene_instances(renderscene& scene, const contentman& cm
 				.type(descriptor::srv)
 				.bff_first_element(0u)
 				.bff_num_elements(num_ui_instances)
-				.bff_bytestride(sizeof(gpu_ui_instance))
+				.bff_bytestride(sizeof(hlsl::ui_instance))
 			).claim();
 		}
 	}
@@ -1109,6 +1296,204 @@ void renderman::process_scene_instances(renderscene& scene, const contentman& cm
 			).claim();
 		}
 	}
+	if (!scene.m_text_instances.empty())
+	{
+		m_textbuffers.m_glyph_instances.clear();
+		for (uint32 t = 0u; t < scene.m_text_instances.size(); ++t)
+		{
+			const renderscene::text_instance& txt = scene.m_text_instances[t];
+			auto font_res = cman.find_typed_asset<asset_type::font>(txt.m_font);
+			if (font_res.is_fail() || font_res.claim() == nullptr)
+			{
+				continue;
+			}
+
+			const font_asset& font = *font_res.claim();
+			uint32 ch_index = 0u;
+			for (const char& ch : txt.m_str)
+			{
+				uint32 asset_glyph_index = 0u;
+				if (font.m_char_to_glyph_index.contains(ch, &asset_glyph_index))
+				{
+					const glyph_key gkey{ 
+						.m_font_id = txt.m_font, 
+						.m_glyph_id = asset_glyph_index
+					};
+
+					uint32 glyph_index = 0u;
+					if (!m_textbuffers.m_key_to_glyph_index.contains(gkey, &glyph_index))
+					{
+						hlsl::glyph new_glyph{};
+						new_glyph.first_curve = (uint32)m_textbuffers.m_curves.size();
+
+						const auto& glyph_asset = font.m_glyphs[asset_glyph_index];
+						for (uint32 c = 0u; c < glyph_asset.m_num_curves; ++c)
+						{
+							const uint32 curve_index = glyph_asset.m_first_curve + c;
+							const auto& curve_asset = font.m_curves[curve_index];
+
+							m_textbuffers.m_curves.push_back({});
+							memcpy(&m_textbuffers.m_curves.back(), &curve_asset.m_points, sizeof(hlsl::curve2D));
+						}
+						new_glyph.num_curves = (uint32)m_textbuffers.m_curves.size() - new_glyph.first_curve;
+						glyph_index = (uint32)m_textbuffers.m_glyphs.size();
+						m_textbuffers.m_glyphs.push_back(new_glyph);
+
+						m_textbuffers.m_key_to_glyph_index[gkey] = glyph_index;
+					}
+
+					hlsl::glyph_instance instance{};
+					instance.glyph_index = glyph_index;
+
+					float3x3 char_transform = txt.m_transform;
+					char_transform[2][0] += ch_index * txt.m_spacing.x;
+					char_transform[2][1]; // y
+					instance.inv_transform2D = char_transform;
+					if (!txt.m_char_to_color.contains(ch, &instance.color))
+					{
+						instance.color = txt.m_color;
+					}
+
+					m_textbuffers.m_glyph_instances.push_back(instance);
+
+					ch_index++;
+				}
+			}
+		}
+
+		stage_buffer<hlsl::glyph>(
+			m_textbuffers.m_glyph_buffer,
+			m_textbuffers.m_glyph_upload,
+			m_textbuffers.m_glyphs).claim();
+
+		stage_buffer<hlsl::curve2D>(
+			m_textbuffers.m_curve_buffer,
+			m_textbuffers.m_curve_upload,
+			m_textbuffers.m_curves).claim();
+
+		stage_buffer<hlsl::glyph_instance>(
+			m_textbuffers.m_instance_buffer,
+			m_textbuffers.m_instance_upload,
+			m_textbuffers.m_glyph_instances).claim();
+
+		m_textbuffers.m_needs_upload = true;
+	}
+	if (!scene.m_trail_instances.empty())
+	{
+		auto& points = m_trailbuffers.m_points;
+		auto& trails = m_trailbuffers.m_trails;
+
+		points.clear();
+		trails.clear();
+		for (uint32 t = 0u; t < scene.m_trail_instances.size(); ++t)
+		{
+			const renderscene::trail_instance& trail = scene.m_trail_instances[t];
+
+			trails.push_back({});
+			hlsl::trail_instance& gpu_trail = trails.back();
+			gpu_trail.first_point = (uint32)points.size();
+			for (uint32 p = 0u; p < trail.m_points.size(); ++p)
+			{
+				const renderscene::trail_instance::point point = trail.m_points[p];
+				points.push_back({});
+				hlsl::trail_point& gpu_point = points.back();
+
+				color col{};
+				if (!trail.m_point_index_to_color.contains(p, &col))
+				{
+					col = trail.m_color;
+				}
+
+				gpu_point.age = 1 - ((float)p / (float)trail.m_points.size());
+				gpu_point.color = col;
+				gpu_point.position_and_width = float4(point.m_position, point.m_width);
+			}
+			gpu_trail.num_points = (uint32)points.size() - gpu_trail.first_point;
+		}
+
+		if (!trails.empty() && !points.empty())
+		{
+			stage_buffer<hlsl::trail_instance>(
+				m_trailbuffers.m_trail_buffer,
+				m_trailbuffers.m_trail_staging,
+				trails).claim();
+
+			stage_buffer<hlsl::trail_point>(
+				m_trailbuffers.m_point_buffer,
+				m_trailbuffers.m_point_staging,
+				points).claim();
+
+			m_trailbuffers.m_needs_upload = true;
+		}
+	}
+
+	// reallocate imgui images & mesh data (if needed)
+	if (!scene.m_imgui_mesh.empty())
+	{
+		const uint32 num_indices = (uint32)scene.m_imgui_mesh.m_indices.size();
+		const uint32 num_vertices = (uint32)scene.m_imgui_mesh.m_vertices.size();
+
+		const uint64 vertbuffer_bytestride = sizeof(hlsl::imgui_vertex);
+		const uint64 vertbuffer_bytesize = vertbuffer_bytestride * scene.m_imgui_mesh.m_vertices.size();
+		const uint64 indbuffer_bytestride = sizeof(uint32);
+		const uint64 indbuffer_bytesize = indbuffer_bytestride * scene.m_imgui_mesh.m_indices.size();
+
+		gpu_resource& vertbuffer = m_imgui_buffers.m_resources[imgui_buffers::vert];
+		gpu_resource& vertbuffer_upload = m_imgui_buffers.m_resources[imgui_buffers::vert_upload];
+		gpu_resource& indbuffer = m_imgui_buffers.m_resources[imgui_buffers::ind];
+		gpu_resource& indbuffer_upload = m_imgui_buffers.m_resources[imgui_buffers::ind_upload];
+		if (vertbuffer.buffer_needs_realloc(vertbuffer_bytesize))
+		{
+			release_if_valid(vertbuffer);
+			release_if_valid(vertbuffer_upload);
+			vertbuffer = gpu_resource::allocate(*m_device, gpu_resource::builder()
+				.type(gpu_resource::buffer)
+				.bytestride(vertbuffer_bytestride)
+				.bytesize(vertbuffer_bytesize)
+				.init_state(D3D12_RESOURCE_STATE_COPY_DEST)
+			).claim();
+			vertbuffer_upload = gpu_resource::allocate(*m_device, gpu_resource::builder()
+				.type(gpu_resource::buffer)
+				.bytestride(vertbuffer_bytestride)
+				.bytesize(vertbuffer_bytesize)
+				.init_state(D3D12_RESOURCE_STATE_COPY_SOURCE)
+				.heap_type(D3D12_HEAP_TYPE_UPLOAD)
+			).claim();
+		}
+		if (indbuffer.buffer_needs_realloc(indbuffer_bytesize))
+		{
+			release_if_valid(indbuffer);
+			release_if_valid(indbuffer_upload);
+			indbuffer = gpu_resource::allocate(*m_device, gpu_resource::builder()
+				.type(gpu_resource::buffer)
+				.bytestride(indbuffer_bytestride)
+				.bytesize(indbuffer_bytesize)
+				.init_state(D3D12_RESOURCE_STATE_COPY_DEST)
+			).claim();
+			indbuffer_upload = gpu_resource::allocate(*m_device, gpu_resource::builder()
+				.type(gpu_resource::buffer)
+				.bytestride(indbuffer_bytestride)
+				.bytesize(indbuffer_bytesize)
+				.init_state(D3D12_RESOURCE_STATE_COPY_SOURCE)
+				.heap_type(D3D12_HEAP_TYPE_UPLOAD)
+			).claim();
+		}
+
+		map_resource<uint32>(indbuffer_upload, [indbuffer_bytesize, &scene](uint32* gpu_index) {
+			memcpy(gpu_index, scene.m_imgui_mesh.m_indices.data(), indbuffer_bytesize);
+		});
+		map_resource<hlsl::imgui_vertex>(vertbuffer_upload, [vertbuffer_bytesize, &scene](hlsl::imgui_vertex* gpu_vertex) {
+			memcpy(gpu_vertex, scene.m_imgui_mesh.m_vertices.data(), vertbuffer_bytesize);
+		});
+
+		m_imgui_buffers.m_needs_upload = true;
+
+		reallocate_image_texture(cman, scene.m_imgui_mesh.m_font_image);
+		for (const auto& image : scene.m_imgui_mesh.m_mesh_images)
+		{
+			reallocate_image_texture(cman, image);
+		}
+	}
 
 	// now that we have counted each instance of each skeleton, 
 	// count up the total instanced bones & assign each skeleton a range
@@ -1163,7 +1548,7 @@ void renderman::process_scene_instances(renderscene& scene, const contentman& cm
 					(*instance).color = instance_data.m_color;
 					(*instance).bone_instance_offset.set_null();
 					(*instance).texid_basecolor.set_null();
-					(*instance).bitflags = (uint8)instance_data.m_bitflags;
+					(*instance).bitflags = instance_data.m_bitflags;
 
 					const auto skel_instance = instance_data.m_skeleton_instance_idx;
 					if (instance_data.m_skeleton != k_id_invalid && skel_instance != (uint32)-1)
@@ -1220,7 +1605,7 @@ void renderman::process_scene_instances(renderscene& scene, const contentman& cm
 				const renderscene::quad_instance& quad = scene.m_quad_instances[q];
 				instance[q].color = quad.m_color;
 				instance[q].transform = quad.m_transform.m_matrix;
-				instance[q].rect_uv = quad.m_rect_uv.m_min_max;
+				instance[q].rect_uv = { quad.m_rect_uv.m_min, quad.m_rect_uv.m_max };
 
 				instance[q].texid_color.set_null();
 				if (m_image_textures.contains(quad.m_image))
@@ -1240,16 +1625,18 @@ void renderman::process_scene_instances(renderscene& scene, const contentman& cm
 	if (!scene.m_ui_instances.empty())
 	{
 		const uint32 num_instances = (uint32)scene.m_ui_instances.size();
-		map_resource<gpu_ui_instance>(m_instancebuffer_ui, [this, &scene, num_instances](gpu_ui_instance* instance) {
-			memcpy(instance, scene.m_ui_instances.data(), sizeof(gpu_ui_instance) * num_instances);
+		map_resource<hlsl::ui_instance>(m_instancebuffer_ui, [this, &scene, num_instances](hlsl::ui_instance* gpu_instance) {
 			for (const auto& cpu_instance : scene.m_ui_instances)
 			{
-				instance->texture_heap_id.set_null();
+				gpu_instance->texture_heap_id.set_null();
+				gpu_instance->color = cpu_instance.m_color;
+				gpu_instance->rect = cpu_instance.m_box;
+				gpu_instance->depth = cpu_instance.m_depth;
 				if (m_image_textures.contains(cpu_instance.m_image))
 				{
-					instance->texture_heap_id = m_image_textures.at(cpu_instance.m_image).m_gpu_heap_slot;
+					gpu_instance->texture_heap_id = m_image_textures.at(cpu_instance.m_image).m_gpu_heap_slot;
 				}
-				instance++;
+				gpu_instance++;
 			}
 		});
 	}
@@ -1284,21 +1671,33 @@ void renderman::process_scene_instances(renderscene& scene, const contentman& cm
 			global->mat_to_lightspace = scene.m_light.m_mat_to_lightspace;
 			global->num_bone_instances = total_num_bone_instances;
 			global->outline_params = float4(1,1,1,1);
-			push_gpu_resource_descriptor(*m_device, m_shadows.m_srv, global->texid_shadows);
-			push_gpu_resource_descriptor(*m_device, m_bitmap.m_uav, global->texid_bitmap_uav);
-			push_gpu_resource_descriptor(*m_device, m_scenecolor.m_uav, global->texid_scenecolor_uav);
+			global->mat_imgui_viewprojection = scene.m_imgui_mesh.m_projection;
+			global->texid_imgui_font.set_null();
+			global->camera_position = scene.m_camera_transform.get_position();
+			for (uint32 i = 0u; i < 8; ++i) 
+				global->player_colors[i] = scene.m_player_colors[i];
+			
+			push_bindless_resource_descriptor(*m_device, m_shadows.m_srv, global->texid_shadows);
+			push_bindless_resource_descriptor(*m_device, m_bitmap.m_uav, global->texid_bitmap_uav);
+			push_bindless_resource_descriptor(*m_device, m_scenecolor.m_uav, global->texid_scenecolor_uav);
+
+			const image_id font_image = scene.m_imgui_mesh.m_font_image;
+			if (!scene.m_imgui_mesh.empty() && font_image != k_id_invalid) {
+				push_bindless_resource_descriptor(
+					*m_device, 
+					m_image_textures.at(font_image).m_srv, 
+					global->texid_imgui_font);
+			}
 		});
 
 		// cbuffer: main view
 		m_cbuffers.write_data(cbuffer::view, view::main, [&scene, &backbuffer_size](void* dest) {
+
 			gpu_cbuffer_view* dest_view = reinterpret_cast<gpu_cbuffer_view*>(dest);
-			const auto mat_view = calculate_view_mat(scene.m_camera_transform.m_matrix);
-			const auto mat_proj = calculate_perspective_proj_mat(scene.m_camera.m_fov_vertical,
-				(float)backbuffer_size.x / (float)backbuffer_size.y,
-				scene.m_camera.m_clip_near,
-				scene.m_camera.m_clip_far);
-			dest_view->viewprojection = mat_proj * mat_view;
 			dest_view->screen_size = backbuffer_size;
+			scene.m_camera.m_aspect_ratio = (float)backbuffer_size.x / (float)backbuffer_size.y;
+			dest_view->viewprojection = 
+				calculate_viewprojection_mat(scene.m_camera_transform.m_matrix, scene.m_camera);
 		});
 	}
 }
@@ -1333,6 +1732,38 @@ void renderman::upload_cpu_to_gpu()
 			state_barrier(m_anim_buffers.m_buffers[b], D3D12_RESOURCE_STATE_GENERIC_READ);
 		}
 		m_anim_buffers.m_needs_upload = false;
+	}
+
+	if (m_imgui_buffers.m_needs_upload)
+	{
+		state_barrier(m_imgui_buffers.m_resources[imgui_buffers::vert], D3D12_RESOURCE_STATE_COPY_DEST);
+		state_barrier(m_imgui_buffers.m_resources[imgui_buffers::ind], D3D12_RESOURCE_STATE_COPY_DEST);
+
+		m_cmdlist->CopyResource(
+			m_imgui_buffers.m_resources[imgui_buffers::vert].m_resource,
+			m_imgui_buffers.m_resources[imgui_buffers::vert_upload].m_resource);
+		m_cmdlist->CopyResource(
+			m_imgui_buffers.m_resources[imgui_buffers::ind].m_resource,
+			m_imgui_buffers.m_resources[imgui_buffers::ind_upload].m_resource);
+
+		state_barrier(m_imgui_buffers.m_resources[imgui_buffers::vert], D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+		state_barrier(m_imgui_buffers.m_resources[imgui_buffers::ind], D3D12_RESOURCE_STATE_INDEX_BUFFER);
+		m_imgui_buffers.m_needs_upload = false;
+	}
+
+	if (m_textbuffers.m_needs_upload)
+	{
+		upload_buffer(m_textbuffers.m_glyph_buffer, m_textbuffers.m_glyph_upload).claim();
+		upload_buffer(m_textbuffers.m_curve_buffer, m_textbuffers.m_curve_upload).claim();
+		upload_buffer(m_textbuffers.m_instance_buffer, m_textbuffers.m_instance_upload).claim();
+		m_textbuffers.m_needs_upload = false;
+	}
+
+	if (m_trailbuffers.m_needs_upload)
+	{
+		upload_buffer(m_trailbuffers.m_trail_buffer, m_trailbuffers.m_trail_staging).claim();
+		upload_buffer(m_trailbuffers.m_point_buffer, m_trailbuffers.m_point_staging).claim();
+		m_trailbuffers.m_needs_upload = false;
 	}
 
 	// always upload the bone instance data
@@ -1376,7 +1807,7 @@ void renderman::upload_cpu_to_gpu()
 		}
 
 		// push each texture onto the gpu heap
-		push_gpu_resource_descriptor(*m_device, tex.m_srv, tex.m_gpu_heap_slot);
+		push_bindless_resource_descriptor(*m_device, tex.m_srv, tex.m_gpu_heap_slot);
 	}
 }
 
@@ -1586,6 +2017,11 @@ void renderman::reallocate_image_texture(const contentman& cman, image_id id)
 		return;
 	}
 
+	if (m_image_textures.contains(id))
+	{
+		return;
+	}
+
 	// (re)allocate gpu texture (don't upload them yet)
 	texture& target_tex = m_image_textures[id];
 	if (!target_tex.m_staging_resource.is_valid() || !target_tex.m_gpu_resource.is_valid())
@@ -1594,12 +2030,12 @@ void renderman::reallocate_image_texture(const contentman& cman, image_id id)
 		release_if_valid(target_tex.m_staging_resource);
 
 		target_tex.m_gpu_resource = gpu_resource::allocate(*m_device, gpu_resource::builder()
-			.texture2D(image_data.m_pixel_width, image_data.m_pixel_height)
+			.texture2D(image_data.width(), image_data.height())
 			.init_state(D3D12_RESOURCE_STATE_COPY_DEST)
 			.format(DXGI_FORMAT_R8G8B8A8_UNORM)
 			).claim();
 
-		const uint64 four_channel_bytesize = sizeof(uint8) * 4 * image_data.m_pixel_width * image_data.m_pixel_height;
+		const uint64 four_channel_bytesize = sizeof(uint8) * 4 * image_data.width() * image_data.height();
 		target_tex.m_staging_resource = gpu_resource::allocate(*m_device, gpu_resource::builder()
 			.buffer_single(four_channel_bytesize)
 			.init_state(D3D12_RESOURCE_STATE_COPY_SOURCE)
@@ -1607,10 +2043,9 @@ void renderman::reallocate_image_texture(const contentman& cman, image_id id)
 		).claim();
 
 		// map the upload resource
-		map_resource<uint8>(target_tex.m_staging_resource, [&image_data](uint8* dest)
-		{
+		map_resource<uint8>(target_tex.m_staging_resource, [&image_data](uint8* dest) {
 			for (uint64 p = 0u; p < image_data.calculate_num_pixels(); ++p)
-				for (uint64 c = 0u; c < image_data.m_num_channels; ++c)
+				for (uint64 c = 0u; c < image_data.num_channels(); ++c)
 				{
 					dest[(p * 4) + c] = image_data.get_pixel_channel_value(p, (uint32)c);
 				}
@@ -1782,7 +2217,8 @@ result<> renderman::state_barrier(dxresource& resource, D3D12_RESOURCE_STATES be
 
 	if (before == after)
 	{
-		return restype::make_warning("state_barrier: skipped - current state is the same as new state!");
+		// return restype::make_warning("state_barrier: skipped - current state is the same as new state!");
+		return {};
 	}
 
 	D3D12_RESOURCE_BARRIER barrier{};
@@ -1800,10 +2236,16 @@ result<> renderman::state_barrier(gpu_resource& resource, D3D12_RESOURCE_STATES 
 {
 	using restype = result<>;
 	if (!resource.is_valid())
+	{
 		return restype::make_warning("state_barrier: skipped - invalid resource!");
+		return {};
+	}
 
 	if (resource.m_current_state == after)
-		return restype::make_warning("state_barrier: skipped - current state is the same as new state!");
+	{
+		// return restype::make_warning("state_barrier: skipped - current state is the same as new state!");
+		return {};
+	}
 
 	auto barrier_res = state_barrier(*resource.m_resource, resource.m_current_state, after);
 	if (barrier_res.is_success())
@@ -1814,18 +2256,27 @@ result<> renderman::state_barrier(gpu_resource& resource, D3D12_RESOURCE_STATES 
 	return barrier_res;
 }
 
-void renderman::clear_gpu_heaps()
+void renderman::reset_bindless_heaps()
 {
+	m_frame_bindless_heaps++;
 	get_descheap(descriptor_heap::gpu_resource).m_stack_ptr = 0;
 	get_descheap(descriptor_heap::gpu_sampler).m_stack_ptr = 0;
 }
 
-bool renderman::push_gpu_resource_descriptor(
+result<> renderman::push_bindless_resource_descriptor(
 	dxdevice& device,
 	const descriptor& source_descriptor,
 	uint32& out_gpu_heap_index,
 	D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_handle)
 {
+	using restype = result<>;
+
+	if (m_frame != m_frame_bindless_heaps - 1)
+	{
+		return restype::make_fail("bindless heaps have not been reset yet!\n"
+			"make sure all push_bindless_descriptor calls happen AFTER reset_bindless_heaps()!");
+	}
+
 	descheap& gpu_descheap = get_descheap(descriptor_heap::gpu_resource);
 	dxdescheap* gpu_dx_heap = gpu_descheap.m_dxheap;
 
@@ -1849,17 +2300,18 @@ bool renderman::push_gpu_resource_descriptor(
 		*out_gpu_handle = dest_gpu_handle;
 	}
 	out_gpu_heap_index = slot;
-	return true;
+	return {};
 }
 
-bool renderman::push_gpu_resource_descriptor(
+result<> renderman::push_bindless_resource_descriptor(
 	dxdevice& device,
 	const descriptor& source_descriptor,
 	gpu_optional& out_gpu_heap_index,
 	D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_handle)
 {
+	using restype = result<>;
 	uint32 out_index = 0u;
-	if (push_gpu_resource_descriptor(device, source_descriptor, out_index, out_gpu_handle))
+	if (push_bindless_resource_descriptor(device, source_descriptor, out_index, out_gpu_handle).is_success())
 	{
 		out_gpu_heap_index.set((int)out_index);
 		return true;
@@ -1867,7 +2319,7 @@ bool renderman::push_gpu_resource_descriptor(
 	else
 	{
 		out_gpu_heap_index.set_null();
-		return false;
+		return restype::make_fail("");
 	}
 }
 
@@ -1932,29 +2384,6 @@ result<> renderman::register_window(void* platform_handle)
 				.type(descriptor::rtv)
 			).claim();
 		}
-
-		// make the depth resource
-		target_swapchain.m_depth = gpu_resource::allocate(*m_device, gpu_resource::builder()
-			.texture2D(dimensions.x, dimensions.y)
-			.format(DXGI_FORMAT_D32_FLOAT)
-			.create_flags(D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
-			.init_state(D3D12_RESOURCE_STATE_DEPTH_WRITE)
-		).claim();
-		target_swapchain.m_dsv = create_resource_descriptor(target_swapchain.m_depth, descriptor::builder()
-			.type(descriptor::dsv)
-		).claim();
-
-		// make uav proxy
-		target_swapchain.m_uav_proxy_resource = gpu_resource::allocate(*m_device, gpu_resource::builder()
-			.texture2D(dimensions.x, dimensions.y)
-			.format(DXGI_FORMAT_R8G8B8A8_UNORM)
-			.create_flags(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
-			.init_state(D3D12_RESOURCE_STATE_COPY_SOURCE)
-		).claim();
-
-		target_swapchain.m_uav_proxy = create_resource_descriptor(target_swapchain.m_uav_proxy_resource, descriptor::builder()
-			.type(descriptor::uav)
-		).claim();
 	}
 
 	return {};

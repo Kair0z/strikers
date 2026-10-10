@@ -5,6 +5,7 @@
 #include "gameman.h"
 #include "inputman.h"
 #include "commandman.h"
+#include "uiman.h"
 using namespace strikers;
 
 extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 619; }
@@ -26,7 +27,8 @@ int main()
     // cman.scan_assets_in_folder(k_content_folder);
     cman.load_fbx(string(k_content_folder) + "scene.fbx").claim();
     cman.load_fbx(string(k_content_folder) + "meshes/box.fbx").claim();
-    cman.load_png(DF_MAIN_FONT).claim();
+    cman.load_ttf(string(k_content_folder) + "fonts/chicago_athletic.ttf").claim();
+    cman.load_otf(string(k_content_folder) + "fonts/scorety.otf").claim();
 
     // initialize the renderer
     renderman rman{};
@@ -34,6 +36,9 @@ int main()
 
     gameman gman{};
     gman.start(cman);
+
+    uiman uman{};
+    uman.initialize(cman);
 
     const platform::window_handle wplatform_handle = wman.get_window_platform_handle(wid).claim();
     rman.register_window(wplatform_handle).claim();
@@ -59,7 +64,8 @@ int main()
         gman.tick(tick);
 
         renderscene scene;
-        gman.build_renderscene(cman, scene);
+        gman.build_renderscene(tick, cman, scene);
+        uman.build_renderscene(delta_seconds, cman, gman, scene);
         rman.render(scene, cman);
 
         if (cm_log_fps.get_value() > 0)

@@ -14,6 +14,7 @@ enum class asset_type
 	skeleton,
 	animation,
 	material,
+	font,
 	num
 };
 
@@ -129,24 +130,40 @@ struct mesh_asset final
 
 struct image_asset final
 {
+	struct desc
+	{
+		uint2 m_size;
+		uint32 m_num_channels;
+
+		desc& size(const uint2& size) { m_size = size; return *this; }
+		desc& num_channels(uint32 num) { m_num_channels = num; return *this; }
+	};
+
 	image_id m_image_id;
-	unsigned char* m_raw_data_ptr;
-	uint32 m_pixel_width;
-	uint32 m_pixel_height;
-	uint32 m_num_channels;
+	byte* m_raw_data_ptr;
 	uint64 m_bytesize;
+	desc m_desc;
 
 	uint8 get_pixel_channel_value(const uint64 pixel_idx, const uint32 channel_idx) const
 	{
-		return m_raw_data_ptr[(pixel_idx * m_num_channels) + channel_idx];
+		return m_raw_data_ptr[(pixel_idx * m_desc.m_num_channels) + channel_idx];
 	}
 	uint64 calculate_num_pixels() const
 	{
-		return m_pixel_height * m_pixel_width;
+		return m_desc.m_size.x * m_desc.m_size.y;
 	}
 	uint64 calculate_pixel_bytesize()
 	{
 		return (m_bytesize / calculate_num_pixels());
+	}
+	uint32 width() const {
+		return m_desc.m_size.x;
+	}
+	uint32 height() const {
+		return m_desc.m_size.y;
+	}
+	uint32 num_channels() const {
+		return m_desc.m_num_channels;
 	}
 };
 
@@ -208,6 +225,26 @@ struct material_asset final
 	image_id m_tex_basecolor = k_id_invalid;
 };
 
+struct font_asset final
+{
+	font_id m_font_id;
+	byte* m_raw_data;
+
+	using curve = bezier::curve<2, bezier::type::quadratic>;
+	struct glyph
+	{
+		uint32 m_first_curve;
+		uint32 m_num_curves;
+		float m_t;
+		float m_bearing_x;
+		float m_bearing_y;
+	};
+
+	vector<curve> m_curves{};
+	vector<glyph> m_glyphs{};
+	umap<char, uint32> m_char_to_glyph_index{};
+};
+
 class contentman final
 {
 	template <asset_type _t>
@@ -218,7 +255,8 @@ class contentman final
 		image_asset,
 		skeleton_asset,
 		animation_asset,
-		material_asset>>;
+		material_asset,
+		font_asset>>;
 	template <asset_type _t>
 	using asset_id_t = std::tuple_element_t<static_cast<uint64>(_t), std::tuple<
 		uint64,
@@ -227,7 +265,8 @@ class contentman final
 		image_id,
 		skel_id,
 		anim_id,
-		mat_id>>;
+		mat_id,
+		font_id>>;
 
 	template <asset_type _t>
 	struct typed_assets final
@@ -242,6 +281,7 @@ class contentman final
 	typed_assets<asset_type::skeleton> m_skeleton_assets;
 	typed_assets<asset_type::animation> m_animation_assets;
 	typed_assets<asset_type::material> m_material_assets;
+	typed_assets<asset_type::font> m_font_assets;
 
 	template <asset_type _t>
 	const typed_assets<_t>& get_typed_assets() const
@@ -252,6 +292,7 @@ class contentman final
 		else if constexpr (_t == asset_type::skeleton) return m_skeleton_assets;
 		else if constexpr (_t == asset_type::animation) return m_animation_assets;
 		else if constexpr (_t == asset_type::material) return m_material_assets;
+		else if constexpr (_t == asset_type::font) return m_font_assets;
 		else return m_none_assets;
 	}
 	template <asset_type _t>
@@ -263,6 +304,7 @@ class contentman final
 		else if constexpr (_t == asset_type::skeleton) return m_skeleton_assets;
 		else if constexpr (_t == asset_type::animation) return m_animation_assets;
 		else if constexpr (_t == asset_type::material) return m_material_assets;
+		else if constexpr (_t == asset_type::font) return m_font_assets;
 		else return m_none_assets;
 	}
 
@@ -296,7 +338,13 @@ public:
 
 	result<asset_id> load_png(const stringview& filepath);
 
-	result<asset_id> load_custom_mesh(const mesh_asset& mesh_data, const mesh_id id);
+	result<asset_id> load_ttf(const stringview& filepath);
+	
+	result<asset_id> load_otf(const stringview& filepath);
+
+	result<asset_id> load_raw_mesh(const mesh_asset& mesh_data, const mesh_id id);
+
+	result<asset_id> load_raw_image(const image_asset::desc& desc, unsigned char* image_data, const image_id id);
 
 	static mesh_id make_mesh_id(const stringview& filepath, uint32 index)
 	{
@@ -346,6 +394,13 @@ public:
 		return static_cast<skel_id>(
 			hash1 ^ (hash2 + 0x9e3779b9 + (hash1 << 6) + (hash1 >> 2))
 			);
+	}
+
+	static font_id make_font_id(const stringview& filepath)
+	{
+		string copy = normalize_path(filepath);
+		const uint64 hash1 = std::hash<stringview>{}(copy);
+		return hash1;
 	}
 
 	static scene_id make_scene_id(const stringview& filepath)
@@ -451,6 +506,16 @@ public:
 		else return false;
 	}
 
+	vector<image_id> get_images() const
+	{
+		vector<image_id> images{}; images.reserve(m_image_assets.m_asset_datas.size());
+		for (const auto& image : m_image_assets.m_asset_datas)
+		{
+			images.push_back(image.m_image_id);
+		}
+		return images;
+	}
+
 private:
 
 	struct asset_graph_entry final
@@ -491,5 +556,6 @@ private:
 
 	result<asset_id> load_assimp_file(const stringview& filepath);
 	result<asset_id> load_image_file(const stringview& filepath);
+	result<asset_id> load_font_file(const stringview& filepath);
 };
 }

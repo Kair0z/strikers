@@ -1,6 +1,6 @@
 # camera
 camera_dev_control  0;
-camera_dev_reset    r;
+camera_dev_reset    shift;
 camera_dev_left     a;
 camera_dev_right    d;
 camera_dev_forward  w;
@@ -46,9 +46,16 @@ phx_gravity_enabled 0;
 # draw
 draw_dbg 0;
 draw_dbg_bounds 1;
-draw_dbg_axis 1;
+draw_dbg_axis 0;
 draw_dbg_transforms 0;
 draw_dbg_ball 0;
 
 # graphics
 gfx_shadowmap_size 45;
+
+# UI
+ui_enabled 0;
+ui_alpha 0.4;
+ui_scale 1;
+
+test_text 0-1;

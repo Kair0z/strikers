@@ -47,8 +47,8 @@
 #include "glm/gtc/quaternion.hpp"
 #include "glm/ext/matrix_transform.hpp"
 #include "glm/ext/matrix_clip_space.hpp"
-namespace strikers {
 
+namespace strikers {
 // common types
 using int32 = int;
 using f32 = float;
@@ -87,6 +87,19 @@ static constexpr uint32 min(const uint32 a, const uint32 b)
 static constexpr uint32 max(const uint32 a, const uint32 b)
 {
 	return a > b ? a : b;
+}
+static const int loop(const int value, int delta, const int inc_min, const int ex_max) 
+{
+	const int new_value = (int)value + delta;
+	if (new_value < inc_min) {
+		const int overshoot = inc_min - new_value;
+		return loop(new_value, overshoot, inc_min, ex_max);
+	}
+	else if (new_value >= ex_max) {
+		const int overshoot = new_value - ex_max;
+		return loop(new_value, overshoot, inc_min, ex_max);
+	}
+	else return new_value;
 }
 
 using wstring = std::wstring;
@@ -161,6 +174,7 @@ using float2 = glm::fvec2;
 using float3 = glm::fvec3;
 using float4 = glm::fvec4;
 using float4x4 = mat4x4;
+using float3x3 = glm::mat3;
 using rotation = glm::quat;
 using color = float4;
 
@@ -214,10 +228,6 @@ struct sphere
 
 	float radius() const { return m_position_radius.w; }
 	float3 position() const { return float3(m_position_radius.x, m_position_radius.y, m_position_radius.z); }
-};
-struct rect
-{
-	float4 m_min_max;
 };
 
 struct light final
@@ -276,6 +286,36 @@ static mat4x4 calculate_orthographic_proj_mat(
 		near_far.y);
 }
 
+static mat4x4 calculate_viewprojection_mat(const mat4x4& camera_transform, const camera& camera)
+{
+	const auto mat_view = calculate_view_mat(camera_transform);
+	const auto mat_proj = calculate_perspective_proj_mat(camera.m_fov_vertical,
+		camera.m_aspect_ratio,
+		camera.m_clip_near,
+		camera.m_clip_far);
+	return mat_proj * mat_view;
+}
+
+static float2 worldpos_to_screenpos(
+	const mat4x4& camera_transform,
+	const camera camera,
+	const float3 worldposition,
+	const float2& screensize)
+{
+	const float4x4 viewprojection = calculate_viewprojection_mat(camera_transform, camera);
+
+	float4 position_cs = viewprojection * float4(worldposition, 1.0f);
+	position_cs.x /= position_cs.w;
+	position_cs.y /= position_cs.w;
+	position_cs.z /= position_cs.w;
+	position_cs.y = -position_cs.y;
+
+	float3 screenposition = float3(position_cs.x, position_cs.y, position_cs.z);
+	screenposition = (screenposition * 0.5f) + float3(0.5f, 0.5f, 0.5f);
+	screenposition *= float3(1280, 720, 1);
+	return float2(screenposition.x, screenposition.y);
+}
+
 static rotation make_look_rotation(const float3& forward, const float3& up = {0,1,0})
 {
 	return glm::quatLookAtRH(glm::normalize(forward), up);
@@ -285,6 +325,18 @@ static mat4x4 calculate_transform(const float3& position, const float3& lookAt, 
 	mat4x4 view = glm::lookAtRH(position, lookAt, up);
 	return glm::inverse(view);
 }
+static float3x3 calculate_transform(const float2& position, float rotation_degrees, const float2& scale) {
+	const float r = glm::radians(rotation_degrees);
+	const float c = std::cos(r);
+	const float s = std::sin(r);
+	return float3x3(
+		c * scale.x, s * scale.x, 0.0f,
+		-s * scale.y, c * scale.y, 0.0f,
+		position.x, position.y, 1.0f
+	);
+}
+
+
 static mat4x4 calculate_transform(const float3& position, const rotation& rot, const float3& scale)
 {
 	return glm::translate(glm::mat4(1.0f), position)
@@ -449,58 +501,53 @@ public:
 	static transform identity() { return transform{ mat4x4(1) }; }
 };
 
-struct box
+template <uint32 _n>
+struct bounds
 {
-	float3 m_position;
-	float3 m_min;
-	float3 m_max;
+	using point = glm::vec<_n, float>;
+	point m_min{};
+	point m_max{};
+	point m_position{};
 
-	box() = default;
-
-	static box unit(float scale = 1.0f)
-	{
-		static box unitbox{};
-		unitbox.m_min = -float3(1, 1, 1) * 0.5f * scale;
-		unitbox.m_max = float3(1, 1, 1) * 0.5f * scale;
-		unitbox.m_position = { 0,0,0 };
-		return unitbox;
+	bounds() = default;
+	static const bounds& unit(float scale) {
+		static bounds unit{};
+		unit.m_min = point(-1) * 0.5f * scale;
+		unit.m_max = point(1) * 0.5f * scale;
+		unit.m_position = {};
+		return unit;
 	}
 
-	void grow_to_fit(const float3 point)
-	{
-		const float3 rel_point = point - m_position;
-		m_min.x = glm::min(m_min.x, rel_point.x);
-		m_min.y = glm::min(m_min.y, rel_point.y);
-		m_min.z = glm::min(m_min.z, rel_point.z);
-		m_max.x = glm::max(m_max.x, rel_point.x);
-		m_max.y = glm::max(m_max.y, rel_point.y);
-		m_max.z = glm::max(m_max.z, rel_point.z);
+	void grow_to_fit(const point& p) {
+		const point rel_point = p - m_position;
+		for (uint32 i = 0u; i < _n; ++i) {
+			m_min[i] = glm::min(m_min[i], rel_point[i]);
+			m_max[i] = glm::max(m_max[i], rel_point[i]);
+		}
 	}
 
-	float3 abs_min() const
-	{
+	point abs_min() const {
 		return m_position + m_min;
 	}
-	float3 abs_max() const
-	{
+	point abs_max() const {
 		return m_position + m_max;
 	}
 
 	// calculate the world aabb for this bounds
-	static box transformed_aabb(const strikers::box& box, const transform& trans, const float3& add_position = {})
+	static bounds transformed_aabb(const bounds& bnds, const transform& trans, const point& add_position = {})
 	{
-		const float3 corners[8] = {
-			{ box.abs_min().x, box.abs_min().y, box.abs_min().z },
-			{ box.abs_max().x, box.abs_min().y, box.abs_min().z },
-			{ box.abs_max().x, box.abs_max().y, box.abs_min().z },
-			{ box.abs_min().x, box.abs_max().y, box.abs_min().z },
-			{ box.abs_min().x, box.abs_min().y, box.abs_max().z },
-			{ box.abs_max().x, box.abs_min().y, box.abs_max().z },
-			{ box.abs_max().x, box.abs_max().y, box.abs_max().z },
-			{ box.abs_min().x, box.abs_max().y, box.abs_max().z },
+		const point corners[8] = {
+			{ bnds.abs_min().x, bnds.abs_min().y, bnds.abs_min().z },
+			{ bnds.abs_max().x, bnds.abs_min().y, bnds.abs_min().z },
+			{ bnds.abs_max().x, bnds.abs_max().y, bnds.abs_min().z },
+			{ bnds.abs_min().x, bnds.abs_max().y, bnds.abs_min().z },
+			{ bnds.abs_min().x, bnds.abs_min().y, bnds.abs_max().z },
+			{ bnds.abs_max().x, bnds.abs_min().y, bnds.abs_max().z },
+			{ bnds.abs_max().x, bnds.abs_max().y, bnds.abs_max().z },
+			{ bnds.abs_min().x, bnds.abs_max().y, bnds.abs_max().z },
 		};
 
-		strikers::box aabb{};
+		bounds aabb{};
 		aabb.m_position = add_position;
 		for (uint32 i = 0u; i < 8; ++i)
 		{
@@ -509,6 +556,8 @@ struct box
 		return aabb;
 	}
 };
+using rect = bounds<2>;
+using box = bounds<3>;
 
 struct collision final
 {
@@ -559,8 +608,69 @@ struct collision final
 };
 
 template <typename _t> using vector = std::vector<_t>;
-template <typename _k, typename _t, typename _h = std::hash<_k>, typename _eq = std::equal_to<_k>> 
-using umap = std::unordered_map<_k, _t, _h, _eq>;
+
+template <typename _k, typename _t, typename _h = std::hash<_k>, typename _eq = std::equal_to<_k>>
+class umap final : public std::unordered_map<_k, _t, _h, _eq>
+{
+public:
+	bool contains(const _k& key, _t* out_found = nullptr) const {
+		const auto& found = this->find(key);
+		if (found != this->cend()) {
+			if (out_found != nullptr) *out_found = found->second;
+			return true;
+		}
+		else return false;
+	}
+};
+
+namespace bezier
+{
+	enum type
+	{
+		line,
+		quadratic,
+		cubic,
+		num
+	};
+
+	enum pointslot
+	{
+		p0,
+		p1,
+		cp0,
+		cp1
+	};
+
+	static constexpr uint32 num_control_points(type t) {
+		return t;
+	}
+	static constexpr uint32 num_points(type t) {
+		return 2 + num_control_points(t);
+	}
+
+	template <uint32 _n, type _t>
+	struct curve final
+	{
+		static const type k_type = _t;
+		using point_type = glm::vec<_n, float>;
+		point_type m_points[num_points(_t)];
+
+		point_type get_midpoint() const {
+			const point_type& point0 = m_points[p0];
+			const point_type& point1 = m_points[p1];
+			return (point1 - point0) * 0.5f;
+		}
+
+		void reset_control_points()
+		{
+			const point_type& midpoint = get_midpoint();
+			for (uint32 cp = 0; cp < num_control_points(_t); ++cp) {
+				m_points[cp0 + cp] = midpoint;
+			}
+		}
+	};
+}
+
 template <typename _fn>
 using func = std::function<_fn>;
 template <typename _t> 
@@ -574,6 +684,7 @@ using skel_id = uint64;
 using anim_id = uint64;
 using mat_id = uint64;
 using camera_id = uint64;
+using font_id = uint64;
 static constexpr uint64 k_id_invalid = (id)-1;
 
 enum class logcolor
@@ -656,7 +767,7 @@ template <typename _ex = int32, typename _unex = const char*>
 class result final
 {
 	#define DF_CHECK_ON_CLAIM 1
-	#define DF_CHECK_ON_MAKE 0
+	#define DF_CHECK_ON_MAKE 1
 	#define DF_RESULT_CHECK								\
     do {												\
         if ((m_flags & error) != 0) {					\

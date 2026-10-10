@@ -13,10 +13,10 @@ namespace strikers {
 // hlsl frontend
 #include "frontend.hlsl"
 
+using gpu_bitflags = hlsl::bitflags;
 using gpu_optional = hlsl::gpu_optional;
 using gpu_vertex = hlsl::mesh_vertex;
 using gpu_instance = hlsl::mesh_instance;
-using gpu_ui_instance = hlsl::ui_instance;
 using gpu_bone = hlsl::bone;
 using gpu_bone_instance = hlsl::bone_instance;
 using gpu_cbuffer_global = hlsl::cbuffer_global;
@@ -25,7 +25,7 @@ using gpu_line_instance = hlsl::line_instance;
 using gpu_quad_instance = hlsl::quad_instance;
 
 class contentman;
-using dxdevice = ID3D12Device;
+using dxdevice = ID3D12Device2;
 using dxswapchain = IDXGISwapChain4;
 using dxadapter = IDXGIAdapter1;
 using dxqueue = ID3D12CommandQueue;
@@ -46,6 +46,7 @@ static uint64 calculate_format_bytesize(DXGI_FORMAT format)
 	{
 	case DXGI_FORMAT_R32_FLOAT:
 	case DXGI_FORMAT_R32_UINT:
+	case DXGI_FORMAT_R8G8B8A8_UNORM:
 		return sizeof(float) * 1;
 	case DXGI_FORMAT_R32G32_FLOAT:
 	case DXGI_FORMAT_R32G32_UINT:
@@ -60,6 +61,55 @@ static uint64 calculate_format_bytesize(DXGI_FORMAT format)
 	return 0;
 }
 
+static void release_if_valid(IUnknown* anything)
+{
+	if (anything != nullptr)
+	{
+		anything->Release();
+	}
+}
+
+static string hr_to_string(HRESULT hr)
+{
+	char* msg = nullptr;
+	DWORD flags =
+		FORMAT_MESSAGE_ALLOCATE_BUFFER |
+		FORMAT_MESSAGE_FROM_SYSTEM |
+		FORMAT_MESSAGE_IGNORE_INSERTS;
+
+	DWORD size = FormatMessageA(
+		flags,
+		nullptr,
+		hr,
+		0,
+		(LPSTR)&msg,
+		0,
+		nullptr
+	);
+
+	string result;
+	if (size && msg) result = msg;
+	else result = "Unknown HRESULT";
+
+	if (msg) LocalFree(msg);
+	return result;
+}
+
+static DxcBuffer blob_encoding_to_dxc(IDxcBlobEncoding* encoding)
+{
+	DxcBuffer result;
+	int encoding_known = false; uint32 code_page;
+	if (SUCCEEDED(encoding->GetEncoding(&encoding_known, &code_page)))
+	{
+		result.Encoding = code_page;
+	}
+
+	result.Ptr = encoding->GetBufferPointer();
+	result.Size = encoding->GetBufferSize();
+	return result;
+}
+
+
 struct cbuffer final
 {
 	enum slot
@@ -73,12 +123,13 @@ struct cbuffer final
 	{
 		switch (slt)
 		{
-		case cbuffer::slot::global: return sizeof(gpu_cbuffer_global);
-		case cbuffer::slot::view: return sizeof(gpu_cbuffer_view);
+		case cbuffer::slot::global: return (sizeof(gpu_cbuffer_global) + 255) & ~size_t(255);
+		case cbuffer::slot::view: return (sizeof(gpu_cbuffer_view) + 255) & ~size_t(255);
 		}
 		return 0u;
 	}
 };
+
 struct view final
 {
 	enum slot
@@ -99,20 +150,12 @@ struct modelshader
 	};
 };
 
-struct render_bitflags
-{
-	enum flags
-	{
-		none = 0,
-		outline = (1 << 0)
-	};
-};
-
 class renderscene final
 {
 public:
 	camera m_camera;
 	transform m_camera_transform;
+	color m_player_colors[8];
 	struct {
 		float4x4 m_mat_to_lightspace;
 		transform m_transform;
@@ -120,6 +163,30 @@ public:
 		box m_frustrum;
 		uint2 m_shadowmap_resolution;
 	} m_light;
+
+	struct imgui_megamesh final
+	{
+		float4x4 m_projection;
+		vector<hlsl::imgui_vertex> m_vertices;
+		vector<uint32> m_indices;
+		vector<uint32> m_mesh_index_starts;
+		vector<uint32> m_mesh_vertex_starts;
+		vector<uint32> m_mesh_num_instances;
+		vector<image_id> m_mesh_images;
+		image_id m_font_image;
+
+		bool empty() const {
+			return m_vertices.empty();
+		}
+
+		void clear() {
+			m_vertices.clear();
+			m_indices.clear();
+			m_mesh_index_starts.clear();
+			m_mesh_vertex_starts.clear();
+			m_mesh_images.clear();
+		}
+	};
 	
 	struct batch_key
 	{
@@ -151,7 +218,7 @@ public:
 		uint32 			m_shader				= modelshader::shaded;
 		image_id		m_img_basecolor			= k_id_invalid;
 		anim_id			m_animation				= k_id_invalid;
-		uint32			m_bitflags				= render_bitflags::none;
+		uint32			m_bitflags;
 
 		void apply_material(const contentman& cman, const mat_id mat);
 		mesh_instance& transform(const transform& trans)
@@ -172,7 +239,14 @@ public:
 	struct ui_instance
 	{
 		float4 m_box;
-		image_id m_image;
+		image_id m_image = k_id_invalid;
+		color m_color;
+		float m_depth;
+
+		ui_instance& image(image_id id) { m_image = id; return *this;  }
+		ui_instance& box(const float4& box) { m_box = box; return *this;  }
+		ui_instance& color(const color& color) { m_color = color; return *this; }
+		ui_instance& depth(const float depth) { m_depth = depth; return *this; }
 	};
 
 	struct line_instance
@@ -198,6 +272,57 @@ public:
 		const line_builder& add_sphere(const transform& transform, const sphere& sphere, const float4& color) const;
 		const line_builder& add_box(const transform& transform, const box& box, const float4& color) const;
 		const line_builder& add_transform(const transform& transform) const;
+	};
+
+	struct text_instance final
+	{
+		string m_str;
+		font_id m_font;
+		float2 m_spacing;
+		float3x3 m_transform{ 1 };
+		color m_color;
+		umap<char, color> m_char_to_color = {};
+
+		text_instance& text(const string& str) { m_str = str; return *this; }
+		text_instance& font(const font_id id) { m_font = id; return *this; }
+		text_instance& transform(const float3x3& trans) { m_transform = trans; return *this; }
+		text_instance& spacing(const float2& spacing) { m_spacing = spacing; return *this; }
+		text_instance& color(const color& clr) { m_color = clr; return *this; }
+		text_instance& color(const char letter, const strikers::color& clr) { m_char_to_color[letter] = clr; return *this; }
+	};
+
+	struct trail_instance final
+	{
+		struct point
+		{
+			float3 m_position;
+			float m_width;
+		};
+		vector<point> m_points;
+		color m_color;
+		umap<uint32, color> m_point_index_to_color{};
+
+		trail_instance& add_point(const float3& position, float width) 
+		{
+			m_points.push_back(point{
+				.m_position = position,
+				.m_width = width });
+			return *this;
+		}
+
+		trail_instance& add_point(
+			const float3& position,
+			float width,
+			const color& color)
+		{
+			m_point_index_to_color[(uint32)m_points.size()] = color;
+			return add_point(position, width);
+		}
+
+		trail_instance& color(const color& color) {
+			m_color = color;
+			return *this;
+		}
 	};
 
 	mesh_instance& add_mesh_instance(const mesh_id mesh, const modelshader::slot shdr)
@@ -227,6 +352,17 @@ public:
 		return m_quad_instances.back();
 	}
 
+	text_instance& add_text_instance()
+	{
+		m_text_instances.push_back({});
+		return m_text_instances.back();
+	}
+
+	trail_instance& add_trail_instance() {
+		m_trail_instances.push_back({});
+		return m_trail_instances.back();
+	}
+
 	uint32 get_meshbatch_num_instances(const batch_key& key) const
 	{
 		return (uint32)m_batch_instance_lookup.at(key).size();
@@ -253,6 +389,9 @@ public:
 	vector<ui_instance> m_ui_instances;
 	vector<line_instance> m_line_instances;
 	vector<quad_instance> m_quad_instances;
+	vector<text_instance> m_text_instances;
+	vector<trail_instance> m_trail_instances;
+	imgui_megamesh m_imgui_mesh;
 };
 
 class shaderman final
@@ -664,6 +803,11 @@ struct gpu_resource
 	dxresource_state m_current_state;
 };
 
+static void release_if_valid(gpu_resource& resource)
+{
+	release_if_valid(resource.m_resource);
+}
+
 template <typename _t, typename _fn>
 result<> map_resource(dxresource& resource, _fn&& func)
 {
@@ -686,6 +830,47 @@ result<> map_resource(gpu_resource& resource, _fn&& func)
 	return map_resource<_t>(*resource.m_resource, func);
 }
 
+struct glyph_key
+{
+	font_id m_font_id;
+	uint32 m_glyph_id;
+
+	struct hash_t {
+		uint64 operator()(const glyph_key& k) const {
+			return ((uint64)k.m_font_id ^ (uint64)k.m_glyph_id) << 1;
+		}
+	};
+	struct equal_t {
+		static bool operator()(const glyph_key& lhs, const glyph_key& rhs)
+		{
+			return lhs.m_font_id == rhs.m_font_id && lhs.m_glyph_id == rhs.m_glyph_id;
+		}
+	};
+};
+
+struct shader
+{
+	enum slot
+	{
+		cs,
+		vs,
+		ps,
+		ms,
+		num
+	};
+};
+
+struct stencilop
+{
+	enum condition
+	{
+		on_depth_fail,
+		on_fail,
+		on_pass,
+		num
+	};
+};
+
 class renderman final
 {
 	dxfactory* m_factory;
@@ -696,6 +881,7 @@ class renderman final
 	dxcmdlist* m_cmdlist;
 	dxfence* m_frame_fence;
 	uint64 m_frame;
+	uint64 m_frame_bindless_heaps;
 	shaderman m_shaderman;
 
 	struct shadowmap
@@ -727,11 +913,7 @@ class renderman final
 	{
 		dxswapchain* m_swapchain;
 		gpu_resource m_buffers[k_num_swapchain_buffers];
-		gpu_resource m_depth;
 		descriptor m_rtvs[k_num_swapchain_buffers];
-		descriptor m_dsv;
-		gpu_resource m_uav_proxy_resource;
-		descriptor m_uav_proxy;
 		uint2 m_current_size;
 
 		uint32 get_current_backbuffer_idx() const
@@ -799,28 +981,6 @@ class renderman final
 		return m_descheaps[(int)slt];
 	}
 
-	struct shader
-	{
-		enum slot
-		{
-			cs,
-			vs,
-			ps,
-			num
-		};
-	};
-
-	struct stencilop
-	{
-		enum condition
-		{
-			on_depth_fail,
-			on_fail,
-			on_pass,
-			num
-		};
-	};
-
 	struct pipeline final
 	{
 		enum slot
@@ -834,7 +994,10 @@ class renderman final
 			wireframe,
 			lines,
 			quads,
+			trails,
 			ui,
+			text,
+			imgui,
 			num_total
 		};
 
@@ -885,41 +1048,51 @@ class renderman final
 				return *this;
 			}
 			builder& primitive_topology_type(D3D12_PRIMITIVE_TOPOLOGY_TYPE type) { m_graphics_desc.PrimitiveTopologyType = type; return *this; }
-			builder& rt_format(uint32 index, DXGI_FORMAT format)
+			builder& format(DXGI_FORMAT format, uint32 rt_index = 0)
 			{
-				m_graphics_desc.NumRenderTargets = glm::max(index + 1, m_graphics_desc.NumRenderTargets);
-				m_graphics_desc.RTVFormats[index] = format;
+				m_graphics_desc.NumRenderTargets = glm::max(rt_index + 1, m_graphics_desc.NumRenderTargets);
+				m_graphics_desc.RTVFormats[rt_index] = format;
 				return *this;
 			}
-			builder& rt_blend_enabled(uint32 index, bool enabled) {}
-			builder& rt_logicop_enabled(uint32 index, bool enabled) {}
-			builder& rt_blend_source_to_dest(uint32 index, D3D12_BLEND src, D3D12_BLEND_OP op, D3D12_BLEND dst)
+			builder& blend_enabled(bool enabled, uint32 rt_index = 0)
 			{
-				m_graphics_desc.NumRenderTargets = glm::max(index + 1, m_graphics_desc.NumRenderTargets);
-				m_graphics_desc.BlendState.RenderTarget[index].SrcBlend = src;
-				m_graphics_desc.BlendState.RenderTarget[index].BlendOp = op;
-				m_graphics_desc.BlendState.RenderTarget[index].DestBlend = dst;
+				m_graphics_desc.NumRenderTargets = glm::max(rt_index + 1, m_graphics_desc.NumRenderTargets);
+				m_graphics_desc.BlendState.RenderTarget[rt_index].BlendEnable = enabled;
 				return *this;
 			}
-			builder& rt_blend_alpha_source_to_dest(uint32 index, D3D12_BLEND src, D3D12_BLEND_OP op, D3D12_BLEND dst)
+			builder& logicop_enabled(bool enabled, uint32 rt_index = 0)
 			{
-				m_graphics_desc.NumRenderTargets = glm::max(index + 1, m_graphics_desc.NumRenderTargets);
-				m_graphics_desc.BlendState.RenderTarget[index].SrcBlendAlpha = src;
-				m_graphics_desc.BlendState.RenderTarget[index].BlendOpAlpha = op;
-				m_graphics_desc.BlendState.RenderTarget[index].DestBlendAlpha = dst;
+				m_graphics_desc.NumRenderTargets = glm::max(rt_index + 1, m_graphics_desc.NumRenderTargets);
+				m_graphics_desc.BlendState.RenderTarget[rt_index].LogicOpEnable = enabled;
 				return *this;
 			}
-			builder& rt_logic_op(uint32 index, D3D12_LOGIC_OP op)
+			builder& blend_source_to_dest(D3D12_BLEND src, D3D12_BLEND_OP op, D3D12_BLEND dst, uint32 rt_index = 0)
 			{
-				m_graphics_desc.NumRenderTargets = glm::max(index + 1, m_graphics_desc.NumRenderTargets);
-				m_graphics_desc.BlendState.RenderTarget[index].LogicOp = op;
-				m_graphics_desc.BlendState.RenderTarget[index].LogicOpEnable = true;
+				m_graphics_desc.NumRenderTargets = glm::max(rt_index + 1, m_graphics_desc.NumRenderTargets);
+				m_graphics_desc.BlendState.RenderTarget[rt_index].SrcBlend = src;
+				m_graphics_desc.BlendState.RenderTarget[rt_index].BlendOp = op;
+				m_graphics_desc.BlendState.RenderTarget[rt_index].DestBlend = dst;
 				return *this;
 			}
-			builder& rt_write_mask(uint32 index, uint8 mask)
+			builder& blend_alpha_source_to_dest(D3D12_BLEND src, D3D12_BLEND_OP op, D3D12_BLEND dst, uint32 rt_index = 0)
 			{
-				m_graphics_desc.NumRenderTargets = glm::max(index + 1, m_graphics_desc.NumRenderTargets);
-				m_graphics_desc.BlendState.RenderTarget[index].RenderTargetWriteMask = mask;
+				m_graphics_desc.NumRenderTargets = glm::max(rt_index + 1, m_graphics_desc.NumRenderTargets);
+				m_graphics_desc.BlendState.RenderTarget[rt_index].SrcBlendAlpha = src;
+				m_graphics_desc.BlendState.RenderTarget[rt_index].BlendOpAlpha = op;
+				m_graphics_desc.BlendState.RenderTarget[rt_index].DestBlendAlpha = dst;
+				return *this;
+			}
+			builder& logic_op(D3D12_LOGIC_OP op, uint32 rt_index = 0)
+			{
+				m_graphics_desc.NumRenderTargets = glm::max(rt_index + 1, m_graphics_desc.NumRenderTargets);
+				m_graphics_desc.BlendState.RenderTarget[rt_index].LogicOp = op;
+				m_graphics_desc.BlendState.RenderTarget[rt_index].LogicOpEnable = true;
+				return *this;
+			}
+			builder& write_mask(uint8 mask, uint32 rt_index = 0)
+			{
+				m_graphics_desc.NumRenderTargets = glm::max(rt_index + 1, m_graphics_desc.NumRenderTargets);
+				m_graphics_desc.BlendState.RenderTarget[rt_index].RenderTargetWriteMask = mask;
 				return *this;
 			}
 
@@ -1045,6 +1218,23 @@ class renderman final
 	};
 	bone_buffers m_bone_buffers;
 
+	struct imgui_buffers final
+	{
+		enum slot
+		{
+			vert,
+			ind,
+			vert_upload,
+			ind_upload,
+			num
+		};
+		gpu_resource m_resources[num];
+		uint32 m_num_vertices;
+		uint32 m_num_indices;
+		bool m_needs_upload = false;
+	};
+	imgui_buffers m_imgui_buffers;
+
 	struct animation_buffers final
 	{
 		enum buffer
@@ -1122,27 +1312,111 @@ class renderman final
 	};
 	umap<image_id, texture> m_image_textures;
 
+	struct trail_buffers
+	{
+		gpu_resource m_trail_staging;
+		gpu_resource m_point_staging;
+		gpu_resource m_trail_buffer;
+		gpu_resource m_point_buffer;
+		bool m_needs_upload = false;
+
+		vector<hlsl::trail_instance> m_trails{};
+		vector<hlsl::trail_point> m_points{};
+	};
+	trail_buffers m_trailbuffers{};
+
+	template <typename _t>
+	result<> stage_buffer(
+		gpu_resource& buffer, 
+		gpu_resource& staging,
+		const vector<_t>& init_data)
+	{
+		using restype = result<>;
+		if (init_data.empty())
+			return restype::make_warning("skipped, init_data is empty!");
+
+		const uint64 bytestride = sizeof(_t);
+		const uint64 bytesize = init_data.size() * sizeof(_t);
+
+		if (buffer.buffer_needs_realloc(bytesize))
+		{
+			release_if_valid(buffer);
+			release_if_valid(staging);
+
+			buffer = gpu_resource::allocate(*m_device, gpu_resource::builder()
+				.type(gpu_resource::type::buffer)
+				.bytestride(bytestride)
+				.bytesize(bytesize)
+				.init_state(D3D12_RESOURCE_STATE_COPY_DEST)
+			).claim();
+
+			staging = gpu_resource::allocate(*m_device, gpu_resource::builder()
+				.type(gpu_resource::type::buffer)
+				.bytestride(bytestride)
+				.bytesize(bytesize)
+				.init_state(D3D12_RESOURCE_STATE_COPY_SOURCE)
+				.heap_type(D3D12_HEAP_TYPE_UPLOAD)
+			).claim();
+		}
+		
+		map_resource<_t>(staging, [this, bytesize, &init_data](_t* gpu_instances) {
+			memcpy(gpu_instances, init_data.data(), bytesize);
+		}).claim();
+		return {};
+	}
+
+	result<> upload_buffer(gpu_resource& buffer, gpu_resource& staging)
+	{
+		using restype = result<>;
+
+		state_barrier(buffer, D3D12_RESOURCE_STATE_COPY_DEST);
+		m_cmdlist->CopyResource(buffer.m_resource, staging.m_resource);
+		state_barrier(buffer, D3D12_RESOURCE_STATE_GENERIC_READ);
+		return {};
+	}
+
+	struct text_buffers
+	{
+		gpu_resource m_glyph_buffer;
+		gpu_resource m_curve_buffer;
+		gpu_resource m_glyph_upload;
+		gpu_resource m_curve_upload;
+		gpu_resource m_glyph_atlas;
+		gpu_resource m_instance_buffer;
+		gpu_resource m_instance_upload;
+
+		vector<hlsl::glyph> m_glyphs;
+		vector<hlsl::curve2D> m_curves;
+		vector<hlsl::glyph_instance> m_glyph_instances{};
+		umap<glyph_key, uint32, glyph_key::hash_t, glyph_key::equal_t> m_key_to_glyph_index;
+
+		bool m_needs_upload = false;
+	};
+	text_buffers m_textbuffers;
+
 public:
 	result<> initialize();
+	void render(renderscene& scene, const contentman& contentman);
+	result<> register_window(void* platform_handle);
+
 	result<> initialize_pipelines();
 
 	result<> state_barrier(dxresource& resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
 	result<> state_barrier(gpu_resource& resource, D3D12_RESOURCE_STATES after);
 
-	void clear_gpu_heaps();
+	void reset_bindless_heaps();
 
-	bool push_gpu_resource_descriptor(
+	result<> push_bindless_resource_descriptor(
 		dxdevice& device, 
 		const descriptor& source_descriptor,
 		uint32& out_gpu_heap_index,
 		D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_handle = nullptr);
-	bool push_gpu_resource_descriptor(
+	
+	result<> push_bindless_resource_descriptor(
 		dxdevice& device,
 		const descriptor& source_descriptor,
 		gpu_optional& out_gpu_heap_index,
 		D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_handle = nullptr);
-
-	void render(renderscene& scene, const contentman& contentman);
 
 	struct meshbatch_filter final
 	{
@@ -1165,15 +1439,11 @@ public:
 		}
 	};
 	void render_meshbatches(renderscene& scene, const contentman& contentman, const meshbatch_filter& filter = {});
-
 	result<descriptor> create_resource_descriptor(dxresource& resource, const descriptor::builder& builder);
 	result<descriptor> create_resource_descriptor(gpu_resource& resource, const descriptor::builder& builder)
 	{
 		return create_resource_descriptor(*resource.m_resource, builder);
 	}
-
-	result<> register_window(void* platform_handle);
-
 	result<gpu_resource*> gpu_resource_with_fallback(gpu_resource& resource);
 
 private:

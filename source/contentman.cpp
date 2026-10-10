@@ -7,6 +7,8 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
 
 #include "logman.h"
 #include "commandman.h"
@@ -575,9 +577,9 @@ result<asset_id> contentman::load_image_file(const stringview& filepath)
     {
         asset.m_image_id = img_id;
         asset.m_raw_data_ptr = raw_image_data;
-        asset.m_pixel_width = out_x;
-        asset.m_pixel_height = out_y;
-        asset.m_num_channels = out_num_channels;
+        asset.m_desc.m_size.x = out_x;
+        asset.m_desc.m_size.y = out_y;
+        asset.m_desc.m_num_channels = out_num_channels;
         asset.m_bytesize = out_x * out_y * sizeof(uint8) * out_num_channels;
     };
 
@@ -597,6 +599,127 @@ result<asset_id> contentman::load_image_file(const stringview& filepath)
         fill_data(img_data);
         return allocate_asset<asset_type::image>(img_id, img_data);
     }
+}
+
+result<asset_id> contentman::load_font_file(const stringview& filepath)
+{
+    if (cm_log_content.enabled())
+        logman::log("loading_font({})", filepath);
+
+    using restype = result<asset_id>;
+
+    std::ifstream file(filepath.data(), std::ios::binary | std::ios::ate);
+    if (!file) return restype::make_fail("failed to read font");
+
+    const size_t size = static_cast<size_t>(file.tellg());
+    std::vector<unsigned char> fontData(size);
+    file.seekg(0);
+    file.read(reinterpret_cast<char*>(fontData.data()), size);
+    if (!file) return restype::make_fail("failed to read font file");
+
+    const int offset = stbtt_GetFontOffsetForIndex(fontData.data(), 0);
+    if (offset < 0) return restype::make_fail("invalid font file");
+
+    stbtt_fontinfo font;
+    if (!stbtt_InitFont(&font, fontData.data(), offset))
+    {
+        return restype::make_fail("failed to initialise font");
+    }
+
+    const font_id fid = make_font_id(filepath);
+
+    font_asset new_asset{};
+    new_asset.m_raw_data = font.data;
+    new_asset.m_font_id = fid;
+
+    // extract the base characters by default
+    constexpr std::string_view default_characters =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz"
+        "0123456789"
+        "!@#$%^&*()-_=+[]{};:',.<>/? ";
+
+    for (char ch : default_characters) {
+        
+        int glyph_index = stbtt_FindGlyphIndex(&font, ch);
+
+        font_asset::glyph glyph{};
+        glyph.m_first_curve = (uint32)new_asset.m_curves.size();
+
+        float2 current{};
+        float2 contour_start{};
+
+        stbtt_vertex* vertices = nullptr;
+        const int vertex_count = stbtt_GetGlyphShape(&font, glyph_index, &vertices);
+
+        float2 avg_point = {};
+        for (int v = 0u; v < vertex_count; ++v) {
+            const stbtt_vertex& vert = vertices[v];
+            avg_point += float2(vert.x, vert.y);
+
+            switch (vert.type) {
+            case STBTT_vmove: {
+                current = {(float)vert.x,(float)vert.y};
+                contour_start = current;
+                break;
+            }
+            case STBTT_vline: {
+                const float2 end = {(float)vert.x,(float)vert.y};
+                font_asset::curve new_curve{};
+                new_curve.m_points[bezier::p0] = current;
+                new_curve.m_points[bezier::p1] = end;
+                new_curve.reset_control_points(); // if it's a line, control points are 'inactive'
+                new_asset.m_curves.push_back(new_curve);
+                current = end;
+                break;
+            }
+            case STBTT_vcurve: {
+                const float2 control = {(float)vert.cx, (float)vert.cy};
+                const float2 end = { (float)vert.x, (float)vert.y };
+                font_asset::curve new_curve{};
+                new_curve.m_points[bezier::p0] = current;
+                new_curve.m_points[bezier::p1] = end;
+                new_curve.m_points[bezier::cp0] = control;
+                new_asset.m_curves.push_back(new_curve);
+                current = end;
+                break;
+            }
+            }
+        }
+        avg_point /= vertex_count;
+
+        glyph.m_num_curves = (uint32)new_asset.m_curves.size() - glyph.m_first_curve;
+
+        // apply average point
+        float inv_avg_distance = 0.0f;
+        for (int c = 0u; c < glyph.m_num_curves; ++c) {
+            auto& curve = new_asset.m_curves[c + glyph.m_first_curve];
+            for (uint32 p = 0; p < _countof(curve.m_points); ++p)
+            {
+                inv_avg_distance += glm::length(curve.m_points[p] - avg_point);
+                curve.m_points[p] -= avg_point;
+            }
+        };
+        inv_avg_distance = 1 / (inv_avg_distance / glyph.m_num_curves);
+
+        for (int c = 0u; c < glyph.m_num_curves; ++c) {
+            auto& curve = new_asset.m_curves[c + glyph.m_first_curve];
+            for (uint32 p = 0; p < _countof(curve.m_points); ++p)
+            {
+                curve.m_points[p] *= inv_avg_distance;
+            }
+        };
+
+        if (glyph.m_num_curves > 0)
+        {
+            new_asset.m_char_to_glyph_index[ch] = (uint32)new_asset.m_glyphs.size();
+            new_asset.m_glyphs.push_back(glyph);
+        }
+
+        stbtt_FreeShape(&font, vertices);
+    }
+
+    return allocate_asset<asset_type::font>(fid, new_asset);
 }
 
 result<asset_id> contentman::load_obj(const stringview& filepath)
@@ -620,13 +743,33 @@ result<asset_id> contentman::load_obj(const stringview& filepath)
     return load_assimp_file(filepath);
 }
 
-result<asset_id> contentman::load_custom_mesh(const mesh_asset& mesh_data, const mesh_id id)
+result<asset_id> contentman::load_raw_mesh(const mesh_asset& mesh_data, const mesh_id id)
 {
     using restype = result<asset_id>;
 
     if (cm_log_content.enabled())
-        logman::log("loading_custom_mesh({})", id);
+        logman::log("loading_raw_mesh({})", id);
+
     return allocate_asset<asset_type::mesh>(id, mesh_data);
+}
+
+result<asset_id> contentman::load_raw_image(
+    const image_asset::desc& desc, 
+    unsigned char* image_data,
+    const image_id id)
+{
+    using restype = result<asset_id>;
+
+    if (cm_log_content.enabled())
+        logman::log("loading_raw_image({})", id);
+    
+    image_asset asset{};
+    asset.m_bytesize = sizeof(uint32) * desc.m_size.x * desc.m_size.y;
+    asset.m_image_id = id;
+    asset.m_desc = desc;
+    asset.m_raw_data_ptr = new byte[asset.m_bytesize];
+    memcpy(asset.m_raw_data_ptr, image_data, asset.m_bytesize);
+    return allocate_asset<asset_type::image>(id, asset);
 }
 
 result<mesh_id> contentman::find_mesh(const stringview& name) const
@@ -740,5 +883,43 @@ result<asset_id> contentman::load_png(const stringview& filepath)
     }
 
     return load_image_file(filepath);
+}
+
+result<asset_id> contentman::load_ttf(const stringview& filepath)
+{
+    using restype = result<asset_id>;
+    if (!std::filesystem::exists(filepath))
+    {
+        return restype::make_fail("file not found!");
+    }
+    if (!std::filesystem::is_regular_file(filepath))
+    {
+        return restype::make_fail("filepath is not a file!");
+    }
+    if (std::filesystem::path(filepath).extension() != ".ttf")
+    {
+        return restype::make_fail("file at path is not .ttf!");
+    }
+
+    return load_font_file(filepath);
+}
+
+result<asset_id> contentman::load_otf(const stringview& filepath)
+{
+    using restype = result<asset_id>;
+    if (!std::filesystem::exists(filepath))
+    {
+        return restype::make_fail("file not found!");
+    }
+    if (!std::filesystem::is_regular_file(filepath))
+    {
+        return restype::make_fail("filepath is not a file!");
+    }
+    if (std::filesystem::path(filepath).extension() != ".otf")
+    {
+        return restype::make_fail("file at path is not .otf!");
+    }
+
+    return load_font_file(filepath);
 }
 }

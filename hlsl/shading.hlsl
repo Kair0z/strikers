@@ -75,10 +75,9 @@ float shadow_term(float3 position_ws, float3 normal_ws)
         return k_no_shadow;
 
     Texture2D tex_shadows = ResourceDescriptorHeap[c_global.texid_shadows];
-    uint width, height, num_levels;
-    tex_shadows.GetDimensions(0, width, height, num_levels);
+    const uint2 shadowmap_size = get_texture_size(tex_shadows);
 
-    const float2 sample_coord = shadowmap_uv * float2(width, height);
+    const float2 sample_coord = shadowmap_uv * shadowmap_size;
     const float shadowmap_depth = tex_shadows.Load(int3(sample_coord, 0)).x;
     return float(shadowmap_position.z - shadowmap_depth < 0.01);
 }
@@ -89,7 +88,7 @@ float4 main_ps(ps_input input) : SV_Target0
     const float3 normal_ws = input.normal_ws;
     const float3 ndotl = dot(normal_ws, normalize(c_global.light_direction.xyz));
     const float3 ambient = float3(1, 1, 1) * 0.05;
-    const float3 diffuse = clamp(-ndotl, 0.2, 1);
+    const float3 diffuse = clamp(-ndotl, 0, 1);
     const float shadow = shadow_term(input.position_ws, normal_ws);
 
     float3 basecolor = input.color.rgb;
@@ -110,5 +109,6 @@ float4 main_ps(ps_input input) : SV_Target0
         bitmap[input.position_cs.xy].r = input.bitflags;
     }
 
-    return float4(saturate((basecolor * diffuse * shadow) + ambient), 1);
+    const float3 lighting = clamp(diffuse * shadow, 0.2, 1);
+    return float4(saturate((basecolor * lighting) + ambient), 1);
 }

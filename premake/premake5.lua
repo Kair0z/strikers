@@ -19,6 +19,9 @@ project "strikers"
         "../source/**.c",
         "../source/**.cpp"
     }
+    local tp_sourcefiles = {
+        "../thirdparty/imgui/source/**.cpp"
+    }
     local headerFiles = {
         includeDir .. "/**.h",
         includeDir .. "/**.hpp"
@@ -28,10 +31,12 @@ project "strikers"
         "../hlsl/**.hlsli"
     }
     files(sourceFiles)
+    files(tp_sourcefiles)
     files(headerFiles)
     -- files(shaderFiles)
     vpaths {
         ["source/*"] = sourceFiles,
+        ["source_thirdparty/*"] = tp_sourcefiles,
         ["include/*"] = headerFiles,
         ["hlsl/*"] = shaderFiles
     }
@@ -42,13 +47,12 @@ project "strikers"
         "../thirdparty/assimp/include",
         "../thirdparty/pix/include",
         "../thirdparty/stb/include",
-        "../thirdparty/box3d/include",
+        "../thirdparty/imgui/include"
     }
     libdirs {
         "../thirdparty/dxc/lib/",
         "../thirdparty/assimp/lib/",
         "../thirdparty/pix/lib/",
-        "../thirdparty/box3d/lib/",
     }
 
     defines{"DF_PIX"}

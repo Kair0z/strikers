@@ -1,10 +1,7 @@
-#include "commandman.h"
+#include "commands.h"
 #include "logman.h"
-
 namespace strikers
 {
-command cm_log_cmds("log_commands", "0", command::flags::oneshot);
-
 command::command(const char* name, const char* default_value, flags flg)
     : m_name{ name }, m_default_value{ default_value }, m_value{ default_value }, m_flags{flg}
 {
