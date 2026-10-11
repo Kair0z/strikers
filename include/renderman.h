@@ -153,6 +153,7 @@ struct modelshader
 class renderscene final
 {
 public:
+	float m_delta_seconds;
 	camera m_camera;
 	transform m_camera_transform;
 	color m_player_colors[8];
@@ -363,6 +364,12 @@ public:
 		return m_trail_instances.back();
 	}
 
+	pfx_spawn& add_pfx_spawn(const pfx_spawn& spawn)
+	{
+		m_pfx_spawns.push_back(spawn);
+		return m_pfx_spawns.back();
+	}
+
 	uint32 get_meshbatch_num_instances(const batch_key& key) const
 	{
 		return (uint32)m_batch_instance_lookup.at(key).size();
@@ -384,6 +391,11 @@ public:
 		return !m_mesh_instances.empty() && !m_batch_instance_lookup.empty();
 	}
 
+	bool any_pfx() const
+	{
+		return !m_pfx_spawns.empty();
+	}
+
 	umap<batch_key, vector<uint32>, batch_key::hash_t, batch_key::equal_t> m_batch_instance_lookup;
 	vector<mesh_instance> m_mesh_instances;
 	vector<ui_instance> m_ui_instances;
@@ -391,6 +403,7 @@ public:
 	vector<quad_instance> m_quad_instances;
 	vector<text_instance> m_text_instances;
 	vector<trail_instance> m_trail_instances;
+	vector<pfx_spawn> m_pfx_spawns{};
 	imgui_megamesh m_imgui_mesh;
 };
 
@@ -494,6 +507,7 @@ public:
 		const stringview& filepath, 
 		const stringview& entrypoint, 
 		const stringview& target,
+		const stringview& rs_name,
 		dxdevice& device);
 
 	result<shader_entry const*> get_shader(
@@ -797,10 +811,56 @@ struct gpu_resource
 		return m_builder.m_type;
 	}
 
+	uint32 buffer_num() const
+	{
+		return m_builder.m_bytesize / m_builder.m_bytestride;
+	}
+
 	dxresource* m_resource = nullptr;
 	builder m_builder;
 	dxresource_state m_previous_state;
 	dxresource_state m_current_state;
+};
+
+struct gpu_indirect_commands
+{
+	enum type
+	{
+		draw_indirect,
+		num
+	};
+
+	gpu_resource m_resource;
+	ID3D12CommandSignature* m_signature;
+
+	static result<gpu_indirect_commands> allocate(dxdevice& dev, uint32 type, const gpu_resource::builder& builder = {})
+	{
+		using restype = result<gpu_indirect_commands>;
+		
+		gpu_resource::builder real_builder = builder;
+		real_builder.buffer_single(sizeof(D3D12_DRAW_ARGUMENTS));
+		
+		gpu_indirect_commands result{};
+		result.m_resource = gpu_resource::allocate(dev, real_builder).claim();
+		
+		D3D12_INDIRECT_ARGUMENT_DESC argumentDesc = {};
+		argumentDesc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+		D3D12_COMMAND_SIGNATURE_DESC signatureDesc = {};
+		signatureDesc.ByteStride = sizeof(D3D12_DRAW_ARGUMENTS);
+		signatureDesc.NumArgumentDescs = 1;
+		signatureDesc.pArgumentDescs = &argumentDesc;
+		signatureDesc.NodeMask = 0;
+		ID3D12CommandSignature* commandSignature;
+		HRESULT hr = dev.CreateCommandSignature(&signatureDesc, nullptr, IID_PPV_ARGS(&result.m_signature));
+		if (!SUCCEEDED(hr))
+		{
+			// todo: do something...
+			return restype::make_fail("");
+		}
+
+		return result;
+	}
+
 };
 
 static void release_if_valid(gpu_resource& resource)
@@ -988,6 +1048,11 @@ class renderman final
 			// compute begin
 			skinning,
 			outline,
+			pfx_reset,
+			pfx_spawn,
+			pfx_pretick,
+			pfx_tick,
+			pfx_generate_draw,
 			// graphics begin
 			shadows,
 			shading,
@@ -995,6 +1060,7 @@ class renderman final
 			lines,
 			quads,
 			trails,
+			pfx,
 			ui,
 			text,
 			imgui,
@@ -1014,11 +1080,12 @@ class renderman final
 			string m_filepath;
 			string m_entrypoints[(uint32)shader::num];
 			string m_targets[(uint32)shader::num];
+			string m_rootsignature_name[(uint32)shader::num];
 
 			builder& filepath(const string& path) { m_filepath = path; return *this; }
 			builder& entrypoint(uint32 shader, const string& path) { m_entrypoints[shader] = path; return *this; }
 			builder& target(uint32 shader, const string& path) { m_targets[shader] = path; return *this; }
-			
+			builder& signature_name(uint32 shader, const string& name) { m_rootsignature_name[shader] = name; return *this; }
 			builder& enable_blend_alpha_to_coverage(bool enabled) { m_graphics_desc.BlendState.AlphaToCoverageEnable = enabled; return *this; }
 			builder& enable_independent_blend(bool enabled) { m_graphics_desc.BlendState.IndependentBlendEnable = enabled; return *this; }
 			builder& enable_stencil(bool enabled) { m_graphics_desc.DepthStencilState.StencilEnable = enabled; return *this; }
@@ -1394,6 +1461,22 @@ class renderman final
 	};
 	text_buffers m_textbuffers;
 
+	struct pfx_buffers
+	{
+		gpu_resource m_particles;
+		gpu_resource m_alive_list;
+		gpu_resource m_dead_list;
+		gpu_resource m_emitters;
+		gpu_resource m_spawns;
+		gpu_resource m_spawns_upload;
+		gpu_resource m_alive_count;
+		gpu_resource m_dead_count;
+		gpu_indirect_commands m_indirect_draw;
+
+		bool m_needs_upload = false;
+	};
+	pfx_buffers m_pfx_buffers;
+
 public:
 	result<> initialize();
 	void render(renderscene& scene, const contentman& contentman);
@@ -1402,7 +1485,9 @@ public:
 	result<> initialize_pipelines();
 
 	result<> state_barrier(dxresource& resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
+	result<> uav_barrier(dxresource& resource);
 	result<> state_barrier(gpu_resource& resource, D3D12_RESOURCE_STATES after);
+	result<> uav_barrier(gpu_resource& resource);
 
 	void reset_bindless_heaps();
 

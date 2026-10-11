@@ -160,6 +160,22 @@ struct trail_instance
     uint first_point;
 };
 
+struct pfx_particle
+{
+    float3 position;
+    float3 velocity;
+    float3 acceleration;
+    float4 color;
+    float2 size;
+    float seconds_remaining;
+};
+
+struct pfx_spawn
+{
+    uint num_to_spawn;
+    pfx_particle particle_init;
+};
+
 struct cbuffer_global
 {
     float4x4 mat_to_lightspace;
@@ -167,11 +183,14 @@ struct cbuffer_global
     float4 light_color;
     float4 light_direction;
     float3 camera_position;
+    float delta_seconds;
     gpu_optional texid_shadows;
     gpu_optional texid_bitmap_uav;
     gpu_optional texid_scenecolor_uav;
     gpu_optional texid_imgui_font;
     uint num_bone_instances;
+    uint max_num_particles;
+    uint num_pfx_spawns;
     float4 outline_params; // a is enabled / not enabled
     float4 player_colors[8];
 };
@@ -180,6 +199,20 @@ struct cbuffer_view
 {
     float4x4 viewprojection;
     uint2 screen_size;
+
+    float2 get_aspect_ratio() {
+        return float2(
+            (float)screen_size.x / screen_size.y,
+            (float)screen_size.y / screen_size.x);
+    }
+};
+
+struct draw_arguments
+{
+    uint num_vertices_per_instance;
+    uint num_instances;
+    uint first_vertex;
+    uint first_instance;
 };
 
 struct bitflags

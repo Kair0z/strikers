@@ -22,6 +22,7 @@ struct component
 		renderui,
 		movement,	// only attached to actors ON the pitch
 		brain,		// AI decision component
+		pfx,
 		num
 	};
 
@@ -116,6 +117,24 @@ struct comp_brain final : public detail::component_t<component::type::brain>
 	float2 m_decision;
 };
 
+struct comp_pfx final : public detail::component_t<component::type::pfx>
+{
+	vector<pfx_emitter> m_emitters{};
+	
+	pfx_emitter& add_emitter() {
+		m_emitters.push_back({});
+		return m_emitters.back();
+	}
+
+	void tick(float delta_seconds)
+	{
+		for (auto& emitter : m_emitters)
+		{
+			emitter.tick(delta_seconds);
+		}
+	}
+};
+
 template <component::type _t>
 using component_t = std::tuple_element_t<static_cast<uint64>(_t), std::tuple<
 	comp_physics,
@@ -126,7 +145,8 @@ using component_t = std::tuple_element_t<static_cast<uint64>(_t), std::tuple<
 	comp_light,
 	comp_ui,
 	comp_movement,
-	comp_brain>>;
+	comp_brain,
+	comp_pfx>>;
 
 struct component_collection
 {
@@ -141,6 +161,7 @@ struct component_collection
 	component_array<component::type::animation> m_animations;
 	component_array<component::type::skeleton> m_skeletons;
 	component_array<component::type::light> m_lights;
+	component_array<component::type::pfx> m_pfx;
 
 	template <component::type _t>
 	component_array<_t>& components()
@@ -154,6 +175,7 @@ struct component_collection
 		else if constexpr (_t == component::type::animation) return m_animations;
 		else if constexpr (_t == component::type::skeleton) return m_skeletons;
 		else if constexpr (_t == component::type::light) return m_lights;
+		else if constexpr (_t == component::type::pfx) return m_pfx;
 	}
 
 	template <component::type _t>
@@ -167,6 +189,7 @@ struct component_collection
 		else if constexpr (_t == component::type::brain) return m_brains;
 		else if constexpr (_t == component::type::skeleton) return m_skeletons;
 		else if constexpr (_t == component::type::light) return m_lights;
+		else if constexpr (_t == component::type::pfx) return m_pfx;
 	}
 };
 }

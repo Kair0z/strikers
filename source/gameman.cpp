@@ -181,6 +181,18 @@ void gameman::start(const contentman& cman)
 				actor(main_actor).component<component::type::physics>()
 					->set_mass(1.0f)
 					.set_layer(collision_layers::common);
+				actor(main_actor).add_component<component::type::pfx>();
+				actor(main_actor).component<component::type::pfx>()
+					->add_emitter()
+					.loop_type(loop::restart)
+					.seconds(0.01f)
+					.add_spawn()
+						.num_to_spawn(1)
+						.init_duration(0.5)
+						.init_size({0.6f, 0.6f})
+						.init_color(colors::white())
+						.init_velocity(random_flt3(true))
+					;
 			}
 			if (builder.m_flags& important_info_builder::runner)
 			{
@@ -830,6 +842,15 @@ void gameman::tick_systems(const tick_context& ctx)
 		}
 	}
 
+	// pfx system
+	{
+		PIXScopedEvent(0, "system_pfx");
+		for (auto& pfx : components<component::type::pfx>())
+		{
+			pfx.tick(ctx.delta_seconds);
+		}
+	}
+
 	// physics system
 	// - update acceleration/velocity/deltapositions
 	// - detect collisions
@@ -1004,7 +1025,8 @@ void gameman::build_renderscene(const tick_context& ctx, contentman& cman, rende
 	// update camera
 	scene.m_camera = m_camera.m_camera;
 	scene.m_camera_transform = actor(m_camera.m_actor).get_transform();
-	
+	scene.m_delta_seconds = ctx.delta_seconds;
+
 	// setup directional light
 	comp_light* light_comp = actor(m_lights.m_actor_directional).component<component::type::light>();
 	if (light_comp)
@@ -1141,83 +1163,104 @@ void gameman::build_renderscene(const tick_context& ctx, contentman& cman, rende
 			}
 		}
 	}
-	
-	// draw trails
+
+	// draw pfx
+	for (auto& cmp_pfx : components<component::type::pfx>())
 	{
-		// Draw smooth-following trail
+		const actor_id owner = cmp_pfx.m_owner;
+		const float3 actor_position = actor(owner).get_position();
+
+		for (auto& emitter : cmp_pfx.m_emitters)
 		{
-			static constexpr uint32 history_length = 32;
-			static constexpr int subdivisions = 3;
+			auto& spawns = emitter.m_spawns;
+			for (uint32 i = 0u; i < spawns.size(); ++i) {
 
-			static float3 history[history_length]{};
-			static uint32 write_index = 0;
-			static uint32 history_count = 0;
+				const pfx_spawn& spawn = spawns[i].m_spawn;
+				if (spawns[i].m_pending_render) {
 
-			const color colr = colors::white();
-			const float width = 0.2f;
-			const float3 current_position =
-				actor(m_ball.m_actor).get_position() + float3(0,0.5,0);
-
-			// Track the ball every frame so the tip sticks to it.
-			history[write_index] = current_position;
-			write_index = (write_index + 1) % history_length;
-			history_count = min(history_count + 1, history_length);
-
-			auto history_at = [&](int i) -> float3
-				{
-					i = glm::clamp(i, 0, (int)history_count - 1);
-
-					const uint32 oldest =
-						(write_index + history_length - history_count)
-						% history_length;
-
-					return history[(oldest + i) % history_length];
-				};
-
-			auto catmull_rom = [](float3 p0, float3 p1,
-				float3 p2, float3 p3, float t) -> float3
-				{
-					const float t2 = t * t;
-					const float t3 = t2 * t;
-
-					return 0.5f * (
-						2.0f * p1 +
-						(-p0 + p2) * t +
-						(2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2 +
-						(-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3
-						);
-				};
-
-			auto& trail = scene.add_trail_instance();
-
-			if (history_count == 1)
-			{
-				trail.add_point(current_position, width, colr);
-			}
-			else
-			{
-				for (int i = 0; i < (int)history_count - 1; ++i)
-				{
-					const float3 p0 = history_at(i - 1);
-					const float3 p1 = history_at(i);
-					const float3 p2 = history_at(i + 1);
-					const float3 p3 = history_at(i + 2);
-
-					for (int j = 0; j < subdivisions; ++j)
-					{
-						const float t = (float)j / subdivisions;
-						const float3 pos = catmull_rom(p0, p1, p2, p3, t);
-
-						trail.add_point(pos, width, colr);
-					}
+					pfx_spawn& render_spawn = scene.add_pfx_spawn(spawn);
+					render_spawn.m_init_position += actor_position;
+					spawns[i].m_pending_render = false;
 				}
-
-				// Exact live tip: no smoothing delay.
-				trail.add_point(current_position, width, colr);
 			}
 		}
 	}
 	
+	// ball following trail
+#if 0
+	if (false)
+	{
+		static constexpr uint32 history_length = 64;
+		static constexpr int subdivisions = 3;
+
+		static float3 history[history_length]{};
+		static uint32 write_index = 0;
+		static uint32 history_count = 0;
+
+		const color colr = colors::white();
+		const float width = 0.2f;
+		const float3 current_position =
+			actor(m_ball.m_actor).get_position() + float3(0, 0.5, 0);
+
+		// Track the ball every frame so the tip sticks to it.
+		history[write_index] = current_position;
+		write_index = (write_index + 1) % history_length;
+		history_count = min(history_count + 1, history_length);
+
+		auto history_at = [&](int i) -> float3
+			{
+				i = glm::clamp(i, 0, (int)history_count - 1);
+
+				const uint32 oldest =
+					(write_index + history_length - history_count)
+					% history_length;
+
+				return history[(oldest + i) % history_length];
+			};
+
+		auto catmull_rom = [](float3 p0, float3 p1,
+			float3 p2, float3 p3, float t) -> float3
+			{
+				const float t2 = t * t;
+				const float t3 = t2 * t;
+
+				return 0.5f * (
+					2.0f * p1 +
+					(-p0 + p2) * t +
+					(2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2 +
+					(-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3
+					);
+			};
+
+		auto& trail = scene.add_trail_instance();
+
+		if (history_count == 1)
+		{
+			trail.add_point(current_position, width, colr);
+		}
+		else
+		{
+			for (int i = 0; i < (int)history_count - 1; ++i)
+			{
+				const float3 p0 = history_at(i - 1);
+				const float3 p1 = history_at(i);
+				const float3 p2 = history_at(i + 1);
+				const float3 p3 = history_at(i + 2);
+
+				for (int j = 0; j < subdivisions; ++j)
+				{
+					const float t = (float)j / subdivisions;
+					const float3 pos = catmull_rom(p0, p1, p2, p3, t);
+
+					trail.add_point(pos, width, colr);
+				}
+			}
+
+			// Exact live tip: no smoothing delay.
+			trail.add_point(current_position, width, colr);
+		}
+	}
+#endif
 
 	// draw ui
 	for (const auto& cmp_ui_render : components<component::type::renderui>())

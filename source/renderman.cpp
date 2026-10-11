@@ -21,6 +21,7 @@ static const char* k_lines_shader_filepath		= DF_FOLDER_SHADERS "lines.hlsl";
 static const char* k_quads_shader_filepath		= DF_FOLDER_SHADERS "quads.hlsl";
 static const char* k_text_shader_filepath		= DF_FOLDER_SHADERS "text.hlsl";
 static const char* k_trails_shader_filepath		= DF_FOLDER_SHADERS "trails.hlsl";
+static const char* k_particles_shader_filepath	= DF_FOLDER_SHADERS "particles.hlsl";
 static const char* k_shader_include_folder		= "D:/Git/strikers/hlsl";
 
 static const char* k_vsps_entrypoints[]{ k_vs_entry, k_ps_entry };
@@ -41,6 +42,7 @@ result<> shaderman::compile_shader(
 	const stringview& filepath, 
 	const stringview& entrypoint,
 	const stringview& target,
+	const stringview& rs_name,
 	dxdevice& device)
 {
 	using restype = result<>;
@@ -87,9 +89,12 @@ result<> shaderman::compile_shader(
 	}
 	// compile root signature
 	{
+		string root_signature_name = "ROOT_SIGNATURE";
+		if (!rs_name.empty()) root_signature_name = rs_name;
+
 		IDxcOperationResult* compiled_rootsig_res = compile_dxc_file(file_dxc_buffer, {
 			"-T", "rootsig_1_1",
-			"-E", "ROOT_SIGNATURE",
+			"-E", root_signature_name.c_str(),
 			"-I", k_shader_include_folder
 			}).claim();
 
@@ -171,8 +176,6 @@ struct pipeline_subobject_builder
 		}
 	};
 };
-
-
 
 result<> renderman::initialize_pipelines()
 {
@@ -348,6 +351,63 @@ result<> renderman::initialize_pipelines()
 				.blend_alpha_source_to_dest(D3D12_BLEND_ONE, D3D12_BLEND_OP_ADD, D3D12_BLEND_INV_SRC_ALPHA)
 			);
 		}
+
+		// pfx pipeline
+		{
+			m_pipelines[pipeline::pfx_reset] = pipeline(pipeline::builder()
+				.filepath(k_particles_shader_filepath)
+				.entrypoint(shader::cs, "reset_cs")
+				.target(shader::cs, k_cs_target)
+				.signature_name(shader::cs, "ROOT_SIGNATURE_COMPUTE")
+			);
+			m_pipelines[pipeline::pfx_spawn] = pipeline(pipeline::builder()
+				.filepath(k_particles_shader_filepath)
+				.entrypoint(shader::cs, "spawn_cs")
+				.target(shader::cs, k_cs_target)
+				.signature_name(shader::cs, "ROOT_SIGNATURE_COMPUTE")
+			);
+			m_pipelines[pipeline::pfx_pretick] = pipeline(pipeline::builder()
+				.filepath(k_particles_shader_filepath)
+				.entrypoint(shader::cs, "pretick_cs")
+				.target(shader::cs, k_cs_target)
+				.signature_name(shader::cs, "ROOT_SIGNATURE_COMPUTE")
+			);
+			m_pipelines[pipeline::pfx_tick] = pipeline(pipeline::builder()
+				.filepath(k_particles_shader_filepath)
+				.entrypoint(shader::cs, "tick_cs")
+				.target(shader::cs, k_cs_target)
+				.signature_name(shader::cs, "ROOT_SIGNATURE_COMPUTE")
+			);
+			m_pipelines[pipeline::pfx_generate_draw] = pipeline(pipeline::builder()
+				.filepath(k_particles_shader_filepath)
+				.entrypoint(shader::cs, "generate_draw_cs")
+				.target(shader::cs, k_cs_target)
+				.signature_name(shader::cs, "ROOT_SIGNATURE_COMPUTE")
+			);
+
+			m_pipelines[pipeline::pfx] = pipeline(pipeline::builder()
+				.filepath(k_particles_shader_filepath)
+				.entrypoint(shader::vs, k_vs_entry)
+				.entrypoint(shader::ps, k_ps_entry)
+				.target(shader::vs, k_vs_target)
+				.target(shader::ps, k_ps_target)
+				// depth & stencil
+				.enable_depth(false)
+				.depth_function(D3D12_COMPARISON_FUNC_LESS)
+				.depth_write_mask(D3D12_DEPTH_WRITE_MASK_ALL)
+				.dsv_format(DXGI_FORMAT_D32_FLOAT)
+				// rasterizer
+				.primitive_topology_type(D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE)
+				.cullmode(D3D12_CULL_MODE_NONE)
+				.fillmode(D3D12_FILL_MODE_SOLID)
+				// sampling
+				.sample_count(1)
+				.sample_mask(0xFFFFFFFF)
+				// render targets
+				.format(DXGI_FORMAT_R8G8B8A8_UNORM)
+				.write_mask(0xf)
+			);
+		}
 	}
 
 	// compile all pipelines' shaders
@@ -358,8 +418,10 @@ result<> renderman::initialize_pipelines()
 		{
 			const string& shader_entrypoint = pip.m_builder.m_entrypoints[s];
 			const string& shader_target = pip.m_builder.m_targets[s];
-			if (!shader_entrypoint.empty() && !shader_target.empty())
-				m_shaderman.compile_shader(pip.m_builder.m_filepath, shader_entrypoint, shader_target, *m_device).claim();
+			if (!shader_entrypoint.empty() && !shader_target.empty()) {
+				const string& rs_name = pip.m_builder.m_rootsignature_name[s];
+				m_shaderman.compile_shader(pip.m_builder.m_filepath, shader_entrypoint, shader_target, rs_name, *m_device).claim();
+			}
 		}
 	}
 
@@ -703,6 +765,35 @@ result<> renderman::initialize()
 			.format(DXGI_FORMAT_R32_TYPELESS)
 		).claim();
 	}
+	// allocate particle buffers
+	{
+		m_pfx_buffers.m_indirect_draw = gpu_indirect_commands::allocate(
+			*m_device, gpu_indirect_commands::draw_indirect, gpu_resource::builder()
+			.create_flags(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)).claim();
+
+		const uint32 num_particles = k_max_num_particles;
+		m_pfx_buffers.m_alive_count = gpu_resource::allocate(*m_device, gpu_resource::builder()
+			.buffer_single(sizeof(uint32))
+			.create_flags(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+		).claim();
+		m_pfx_buffers.m_dead_count = gpu_resource::allocate(*m_device, gpu_resource::builder()
+			.buffer_single(sizeof(uint32))
+			.create_flags(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+		).claim();
+
+		m_pfx_buffers.m_alive_list = gpu_resource::allocate(*m_device, gpu_resource::builder()
+			.buffer_with_num<uint32>(num_particles)
+			.create_flags(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+		).claim();
+		m_pfx_buffers.m_dead_list = gpu_resource::allocate(*m_device, gpu_resource::builder()
+			.buffer_with_num<uint32>(num_particles)
+			.create_flags(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+		).claim();
+		m_pfx_buffers.m_particles = gpu_resource::allocate(*m_device, gpu_resource::builder()
+			.buffer_with_num<hlsl::pfx_particle>(num_particles)
+			.create_flags(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+		).claim();
+	}
 
 	initialize_pipelines().claim();
 
@@ -976,6 +1067,7 @@ void renderman::render(renderscene& scene, const contentman& cman)
 			m_cmdlist->DrawInstanced(6, num_instances, 0, 0);
 		}
 
+		// trail rendering
 		ID3D12GraphicsCommandList6* cmdlist6 = nullptr;
 		const bool any_trails = !m_trailbuffers.m_trails.empty() && m_trailbuffers.m_points.size() != 0;
 		if (any_trails && SUCCEEDED(m_cmdlist->QueryInterface(IID_PPV_ARGS(&cmdlist6))))
@@ -992,6 +1084,100 @@ void renderman::render(renderscene& scene, const contentman& cman)
 
 			const uint32 num_groups = m_trailbuffers.m_trails.size();
 			cmdlist6->DispatchMesh(num_groups, 1, 1);
+		}
+		
+		// pfx rendering
+		{
+			PIXScopedEvent(m_cmdlist, 0u, "[pfx]");
+
+			auto root_params = [this]() {
+				m_cmdlist->SetComputeRootConstantBufferView(0, m_cbuffers.resource(cbuffer::global).gpu_address());
+				m_cmdlist->SetComputeRootShaderResourceView(1, m_pfx_buffers.m_spawns.gpu_address());
+				m_cmdlist->SetComputeRootUnorderedAccessView(2, m_pfx_buffers.m_particles.gpu_address());
+				m_cmdlist->SetComputeRootUnorderedAccessView(3, m_pfx_buffers.m_alive_list.gpu_address());
+				m_cmdlist->SetComputeRootUnorderedAccessView(4, m_pfx_buffers.m_dead_list.gpu_address());
+				m_cmdlist->SetComputeRootUnorderedAccessView(5, m_pfx_buffers.m_alive_count.gpu_address());
+				m_cmdlist->SetComputeRootUnorderedAccessView(6, m_pfx_buffers.m_dead_count.gpu_address());
+				m_cmdlist->SetComputeRootUnorderedAccessView(7, m_pfx_buffers.m_indirect_draw.m_resource.gpu_address());
+			};
+			auto uav_barriers = [this](){
+				uav_barrier(m_pfx_buffers.m_particles);
+				uav_barrier(m_pfx_buffers.m_alive_list);
+				uav_barrier(m_pfx_buffers.m_dead_list);
+				uav_barrier(m_pfx_buffers.m_alive_count);
+				uav_barrier(m_pfx_buffers.m_dead_count);
+				uav_barrier(m_pfx_buffers.m_indirect_draw.m_resource);
+			};
+
+			// first frame reset
+			static bool first_frame = true;
+			if (first_frame) {
+				m_cmdlist->SetComputeRootSignature(m_pipelines[pipeline::pfx_reset].m_dxsignature);
+				root_params();
+
+				m_cmdlist->SetPipelineState(m_pipelines[pipeline::pfx_reset].m_dxpipeline);
+
+				const uint32 num_groups = ceil_div(m_pfx_buffers.m_particles.buffer_num(), 64);
+				m_cmdlist->Dispatch(num_groups, 1, 1);
+				
+				uav_barriers();
+
+				first_frame = false;
+			}
+
+			// dispatch spawn
+			if (scene.any_pfx())
+			{
+				m_cmdlist->SetComputeRootSignature(m_pipelines[pipeline::pfx_spawn].m_dxsignature);
+				m_cmdlist->SetPipelineState(m_pipelines[pipeline::pfx_spawn].m_dxpipeline);
+				root_params();
+				
+				const uint32 num_groups = ceil_div(m_pfx_buffers.m_spawns.buffer_num(), 64);
+				m_cmdlist->Dispatch(num_groups, 1, 1);
+				uav_barriers();
+			}
+			// dispatch pretick
+			{
+				m_cmdlist->SetComputeRootSignature(m_pipelines[pipeline::pfx_pretick].m_dxsignature);
+				m_cmdlist->SetPipelineState(m_pipelines[pipeline::pfx_pretick].m_dxpipeline);
+				root_params();
+
+				m_cmdlist->Dispatch(1, 1, 1);
+				uav_barriers();
+			}
+			// dispatch tick
+			{
+				m_cmdlist->SetComputeRootSignature(m_pipelines[pipeline::pfx_tick].m_dxsignature);
+				m_cmdlist->SetPipelineState(m_pipelines[pipeline::pfx_tick].m_dxpipeline);
+				root_params();
+
+				const uint32 num_groups = ceil_div(m_pfx_buffers.m_particles.buffer_num(), 64);
+				m_cmdlist->Dispatch(num_groups, 1, 1);
+				uav_barriers();
+			}
+			// dispatch draw generate
+			{
+				m_cmdlist->SetComputeRootSignature(m_pipelines[pipeline::pfx_generate_draw].m_dxsignature);
+				m_cmdlist->SetPipelineState(m_pipelines[pipeline::pfx_generate_draw].m_dxpipeline);
+				root_params();
+
+				m_cmdlist->Dispatch(1, 1, 1);
+				uav_barriers();
+			}
+			
+			// draw
+			m_cmdlist->SetPipelineState(m_pipelines[pipeline::pfx].m_dxpipeline);
+			m_cmdlist->SetGraphicsRootSignature(m_pipelines[pipeline::pfx].m_dxsignature);
+			m_cmdlist->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+			m_cmdlist->SetGraphicsRootConstantBufferView(0, m_cbuffers.resource(cbuffer::view, view::main).gpu_address());
+			m_cmdlist->SetGraphicsRootShaderResourceView(1, m_pfx_buffers.m_particles.gpu_address());
+			m_cmdlist->SetGraphicsRootShaderResourceView(2, m_pfx_buffers.m_alive_list.gpu_address());
+			
+			m_cmdlist->ExecuteIndirect(
+				m_pfx_buffers.m_indirect_draw.m_signature, 
+				1, 
+				m_pfx_buffers.m_indirect_draw.m_resource.m_resource, 
+				0u, nullptr, 0u);
 		}
 	}
 
@@ -1063,7 +1249,6 @@ void renderman::render(renderscene& scene, const contentman& cman)
 			m_cmdlist->DrawIndexedInstanced(num_indices, num_instances, index_start, vertex_start, 0);
 		}
 	}
-
 	if (!scene.m_text_instances.empty())
 	{
 		PIXScopedEvent(m_cmdlist, 0u, "[text]");
@@ -1426,6 +1611,29 @@ void renderman::process_scene_instances(renderscene& scene, const contentman& cm
 			m_trailbuffers.m_needs_upload = true;
 		}
 	}
+	if (!scene.m_pfx_spawns.empty())
+	{
+		vector<hlsl::pfx_spawn> spawns{};
+		spawns.resize(scene.m_pfx_spawns.size());
+		for (uint32 s = 0u; s < scene.m_pfx_spawns.size(); ++s)
+		{
+			const pfx_spawn& scene_spawn = scene.m_pfx_spawns[s];
+			spawns[s].num_to_spawn = scene_spawn.m_num_to_spawn;
+			spawns[s].particle_init.acceleration = scene_spawn.m_init_acceleration;
+			spawns[s].particle_init.seconds_remaining = scene_spawn.m_init_duration;
+			spawns[s].particle_init.velocity = scene_spawn.m_init_velocity;
+			spawns[s].particle_init.position = scene_spawn.m_init_position;
+			spawns[s].particle_init.size = scene_spawn.m_init_size;
+			spawns[s].particle_init.color = scene_spawn.m_init_color;
+		}
+
+		stage_buffer<hlsl::pfx_spawn>(
+			m_pfx_buffers.m_spawns,
+			m_pfx_buffers.m_spawns_upload,
+			spawns).claim();
+		
+		m_pfx_buffers.m_needs_upload = true;
+	}
 
 	// reallocate imgui images & mesh data (if needed)
 	if (!scene.m_imgui_mesh.empty())
@@ -1670,9 +1878,12 @@ void renderman::process_scene_instances(renderscene& scene, const contentman& cm
 			global->light_direction = float4(-scene.m_light.m_transform.get_forward(), 1);
 			global->mat_to_lightspace = scene.m_light.m_mat_to_lightspace;
 			global->num_bone_instances = total_num_bone_instances;
+			global->max_num_particles = k_max_num_particles;
+			global->num_pfx_spawns = (uint32)scene.m_pfx_spawns.size();
 			global->outline_params = float4(1,1,1,1);
 			global->mat_imgui_viewprojection = scene.m_imgui_mesh.m_projection;
 			global->texid_imgui_font.set_null();
+			global->delta_seconds = scene.m_delta_seconds;
 			global->camera_position = scene.m_camera_transform.get_position();
 			for (uint32 i = 0u; i < 8; ++i) 
 				global->player_colors[i] = scene.m_player_colors[i];
@@ -1764,6 +1975,12 @@ void renderman::upload_cpu_to_gpu()
 		upload_buffer(m_trailbuffers.m_trail_buffer, m_trailbuffers.m_trail_staging).claim();
 		upload_buffer(m_trailbuffers.m_point_buffer, m_trailbuffers.m_point_staging).claim();
 		m_trailbuffers.m_needs_upload = false;
+	}
+
+	if (m_pfx_buffers.m_needs_upload)
+	{
+		upload_buffer(m_pfx_buffers.m_spawns, m_pfx_buffers.m_spawns_upload).claim();
+		m_pfx_buffers.m_needs_upload = false;
 	}
 
 	// always upload the bone instance data
@@ -2232,6 +2449,17 @@ result<> renderman::state_barrier(dxresource& resource, D3D12_RESOURCE_STATES be
 	return {};
 }
 
+result<> renderman::uav_barrier(dxresource& resource)
+{
+	using restype = result<>;
+	D3D12_RESOURCE_BARRIER barrier{};
+	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+	barrier.Flags = {};
+	barrier.UAV.pResource = &resource;
+	m_cmdlist->ResourceBarrier(1, &barrier);
+	return {};
+}
+
 result<> renderman::state_barrier(gpu_resource& resource, D3D12_RESOURCE_STATES after)
 {
 	using restype = result<>;
@@ -2255,6 +2483,19 @@ result<> renderman::state_barrier(gpu_resource& resource, D3D12_RESOURCE_STATES 
 	}
 	return barrier_res;
 }
+
+result<> renderman::uav_barrier(gpu_resource& resource)
+{
+	using restype = result<>;
+	if (!resource.is_valid())
+	{
+		return restype::make_warning("uav_barrier: skipped - invalid resource!");
+		return {};
+	}
+
+	return uav_barrier(*resource.m_resource);
+}
+
 
 void renderman::reset_bindless_heaps()
 {

@@ -67,8 +67,8 @@ static const char* k_content_folder = DF_FOLDER_CONTENT;
 static const char* k_shaders_folder = DF_FOLDER_SHADERS;
 static constexpr uint32 k_num_runners_per_team = 4;
 static constexpr uint32 k_num_keepers_per_team = 1;
-
 static constexpr uint32 k_num_swapchain_buffers = 3;
+static constexpr uint32 k_max_num_particles = 4096 * 4;
 
 template <typename _t>
 static constexpr _t k_invalid = (_t)-1;
@@ -87,19 +87,6 @@ static constexpr uint32 min(const uint32 a, const uint32 b)
 static constexpr uint32 max(const uint32 a, const uint32 b)
 {
 	return a > b ? a : b;
-}
-static const int loop(const int value, int delta, const int inc_min, const int ex_max) 
-{
-	const int new_value = (int)value + delta;
-	if (new_value < inc_min) {
-		const int overshoot = inc_min - new_value;
-		return loop(new_value, overshoot, inc_min, ex_max);
-	}
-	else if (new_value >= ex_max) {
-		const int overshoot = new_value - ex_max;
-		return loop(new_value, overshoot, inc_min, ex_max);
-	}
-	else return new_value;
 }
 
 using wstring = std::wstring;
@@ -178,6 +165,14 @@ using float3x3 = glm::mat3;
 using rotation = glm::quat;
 using color = float4;
 
+static float3 random_flt3(bool normalize = false) {
+	float3 result;
+	for (uint32 i = 0u; i < 3; ++i) {
+		result[i] = random_flt(-1, 1);
+	}
+	return normalize ? glm::normalize(result) : result;
+}
+
 inline float lerp(const float a, const float b, float t)
 {
 	t = glm::clamp(t, 0.0f, 1.0f);
@@ -203,7 +198,9 @@ inline float2 remap(const float2& value, float a_min, float a_max, float b_min, 
 		remap(value.y, a_min, a_max, b_min, b_max, power)
 	);
 }
-
+inline uint32 ceil_div(const uint32 value, const uint32 div) {
+	return (value + div - 1) / div;
+}
 namespace colors
 {
 	static constexpr color red() { return float4(1, 0, 0, 1); }
@@ -842,5 +839,130 @@ public:
 	static result make_success(const _ex& ex = {}) { return result(ex); }
 	static result make_fail(_unex&& unex) { return result(unex, error); }
 	static result make_warning(_unex&& unex) { return result(unex, warning); }
+};
+
+struct loop
+{
+	enum type
+	{
+		clamp,
+		restart,
+		pingpong,
+		num
+	};
+
+	template <typename _t>
+	static _t increment(
+		uint32 ltype,
+		const _t& value,
+		const _t& delta,
+		const _t& inc_min,
+		const _t& ex_max)
+	{
+		const _t new_value = value + delta;
+
+		if (ltype != type::restart)
+			return new_value;
+
+		const _t range = ex_max - inc_min;
+
+		if (range <= _t{})
+			return inc_min;
+
+		_t offset = std::fmod(new_value - inc_min, range);
+
+		if (offset < _t{})
+			offset += range;
+
+		return inc_min + offset;
+	}
+};
+
+// pfx
+struct pfx_spawn final
+{
+	uint32 m_num_to_spawn;
+	float3 m_init_position;
+	float3 m_init_velocity;
+	float3 m_init_acceleration;
+	float m_init_duration;
+	float2 m_init_size;
+	color m_init_color;
+
+	pfx_spawn& num_to_spawn(uint32 num) { m_num_to_spawn = num; return *this; };
+	pfx_spawn& init_position(const float3& vec) { m_init_position = vec; return *this; };
+	pfx_spawn& init_velocity(const float3& vec) { m_init_velocity = vec; return *this; };
+	pfx_spawn& init_acceleration(const float3& acc) { m_init_acceleration = acc; return *this; };
+	pfx_spawn& init_duration(float s) { m_init_duration = s; return *this; };
+	pfx_spawn& init_size(const float2& size) { m_init_size = size; return *this; }
+	pfx_spawn& init_color(const color& color) { m_init_color = color; return *this; }
+};
+
+struct pfx_emitter
+{
+	struct per_spawn
+	{
+		pfx_spawn m_spawn;
+		float m_t = 0.0f;
+		uint64 m_last_cycle = 0u;
+		bool m_pending_render = false;
+	};
+	vector<per_spawn> m_spawns{};
+
+	float m_seconds = 1.0f;
+	float m_time;
+	uint32 m_loop_type = loop::clamp;
+	uint64 m_cycle = 1u; // start this at 1 so spawn cycles are always 1 frame behind
+
+	pfx_spawn& add_spawn(const float t = 0.0f) {
+
+		m_spawns.push_back({});
+		per_spawn& entry = m_spawns.back();
+		entry.m_t = t;
+		entry.m_last_cycle = 0u;
+		return entry.m_spawn;
+	}
+
+	pfx_emitter& loop_type(loop::type type) {
+		m_loop_type = type;
+		return *this;
+	}
+
+	pfx_emitter& seconds(float seconds) {
+		m_seconds = seconds;
+		return *this;
+	}
+
+	void tick(const float delta_seconds)
+	{
+		const float delta = delta_seconds / m_seconds;
+		m_time += delta;
+		
+		const uint64 cycle = glm::ceil(m_time);
+		for (per_spawn& spawn : m_spawns) 
+		{
+			spawn.m_pending_render = false;
+
+			if (spawn.m_last_cycle < cycle) {
+
+				// if we crossed the
+				const float local_t = std::fmod(m_time, 1.0f);
+				if (local_t > spawn.m_t)
+				{
+					spawn.m_pending_render = true;
+					spawn.m_last_cycle = cycle;
+				}
+			}
+		}
+	}
+
+	void reset()
+	{
+		m_time = 0.0f;
+		for (uint32 i = 0u; i < m_spawns.size(); ++i)
+		{
+			m_spawns[i].m_last_cycle = 0u;
+		}
+	}
 };
 }

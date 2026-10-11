@@ -17,9 +17,9 @@ struct ps_input
     uint texid_color      : TEXCOORD1;
 };
 
-ConstantBuffer<cbuffer_global>  c_global    : register(b0);
-ConstantBuffer<cbuffer_view>    c_view      : register(b1);
-StructuredBuffer<quad_instance> t_instances : register(t0);
+ConstantBuffer<cbuffer_global>  c_global            : register(b0);
+ConstantBuffer<cbuffer_view>    c_view              : register(b1);
+StructuredBuffer<quad_instance> t_instances         : register(t0);
 
 [Shader("vertex")]
 ps_input main_vs(uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
@@ -27,6 +27,7 @@ ps_input main_vs(uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
     quad_instance inst = t_instances[instance_id];
     const float2 rect_uv_min = inst.rect_uv.xy;
     const float2 rect_uv_max = float2(1,1) - inst.rect_uv.zw;
+
     ps_input output;
     if (vertex_id == 0)
         output.position = float4(-1,-1,0,1),
